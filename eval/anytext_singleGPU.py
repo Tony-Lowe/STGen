@@ -174,8 +174,8 @@ def process(model, ddim_sampler, item_dict, a_prompt, n_prompt, num_samples, ima
         info['masked_x'] = torch.cat([masked_x for _ in range(num_samples)], dim=0)
 
         hint = arr2tensor(hint, num_samples)
-
-        cond = model.get_learned_conditioning(dict(c_concat=[hint], c_crossattn=[[prompt + ', ' + a_prompt] * num_samples], text_info=info))
+        # c_concat是用的到的。info也用的到
+        cond = model.get_learned_conditioning(dict(c_concat=[hint], c_crossattn=[[prompt + ', ' + a_prompt] * num_samples], text_info=info)) # c_cross_attn 在前期是prompt text，后期是text embedding
         un_cond = model.get_learned_conditioning(dict(c_concat=[hint], c_crossattn=[[n_prompt] * num_samples], text_info=info))
         shape = (4, H // 8, W // 8)
         if save_memory:

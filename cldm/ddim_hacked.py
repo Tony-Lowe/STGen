@@ -53,8 +53,8 @@ class DDIMSampler(object):
 
     @torch.no_grad()
     def sample(self,
-               S,
-               batch_size,
+               S,           # ddim_steps
+               batch_size,  # image_count
                shape,
                conditioning=None,
                callback=None,
@@ -172,6 +172,7 @@ class DDIMSampler(object):
             if img_callback: img_callback(pred_x0, i)
 
             if index % log_every_t == 0 or index == total_steps - 1:
+                # print(index)
                 intermediates['x_inter'].append(img)
                 intermediates['pred_x0'].append(pred_x0)
 
@@ -191,12 +192,19 @@ class DDIMSampler(object):
             model_uncond = self.model.apply_model(x, t, unconditional_conditioning)
             model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
 
-        if self.model.parameterization == "v":
+        # # %-----------------------%
+        # # 记得删掉！！！！！！
+        # x = torch.concat((x,x))
+        # b = b*2
+        # # 记得删掉！！！！！！
+        # # %-----------------------%
+
+        if self.model.parameterization == "v": # Using  default eps in anytext
             e_t = self.model.predict_eps_from_z_and_v(x, t, model_output)
         else:
             e_t = model_output
 
-        if score_corrector is not None:
+        if score_corrector is not None: # is None in AnyText
             assert self.model.parameterization == "eps", 'not implemented'
             e_t = score_corrector.modify_score(self.model, e_t, x, t, c, **corrector_kwargs)
 
@@ -211,12 +219,12 @@ class DDIMSampler(object):
         sqrt_one_minus_at = torch.full((b, 1, 1, 1), sqrt_one_minus_alphas[index],device=device)
 
         # current prediction for x_0
-        if self.model.parameterization != "v":
+        if self.model.parameterization != "v":  # Using  default eps in anytext
             pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
         else:
-            pred_x0 = self.model.predict_start_from_z_and_v(x, t, model_output)
+            pred_x0 = self.model.predict_start_from_z_and_v(x, t, model_output) # remove the noise from the prediction
 
-        if quantize_denoised:
+        if quantize_denoised: # False in AnyText
             pred_x0, _, *_ = self.model.first_stage_model.quantize(pred_x0)
 
         if dynamic_threshold is not None:

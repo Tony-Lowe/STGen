@@ -47,6 +47,12 @@ def parse_args():
         default=None,
         help="load a specified anytext checkpoint"
     )
+    parser.add_argument(
+        "--download_path",
+        type=str,
+        default="/data/modelscope",
+        help="load a specified anytext checkpoint",
+    )
     args = parser.parse_args()
     return args
 
@@ -58,6 +64,7 @@ infer_params = {
     "use_fp16": not args.use_fp32,
     "use_translator": not args.no_translator,
     "font_path": args.font_path,
+    "download_path": args.download_path
 }
 if args.model_path:
     infer_params['model_path'] = args.model_path
@@ -473,6 +480,7 @@ with block:
     ips = [prompt, pos_radio, sort_radio, revise_pos, base_model_path, lora_path_ratio, show_debug, draw_img, rect_img, ref_img, ori_img, img_count, ddim_steps, image_width, image_height, strength, cfg_scale, seed, eta, a_prompt, n_prompt, *(rect_cb_list+rect_xywh_list)]
     run_gen.click(fn=process, inputs=[gr.State('gen')] + ips, outputs=[result_gallery, result_info])
     run_edit.click(fn=process, inputs=[gr.State('edit')] + ips, outputs=[result_gallery, result_info])
+
 
 
 block.launch(

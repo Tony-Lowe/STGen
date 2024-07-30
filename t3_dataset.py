@@ -54,12 +54,13 @@ def draw_glyph(font, text):
 
 
 def draw_glyph2(font, text, polygon, vertAng=10, scale=1, width=512, height=512, add_space=True):
-    enlarge_polygon = polygon*scale
+    enlarge_polygon = polygon * scale
     rect = cv2.minAreaRect(enlarge_polygon)
     box = cv2.boxPoints(rect)
     box = np.int0(box)
     w, h = rect[1]
     angle = rect[2]
+    center = rect[0]
     if angle < -45:
         angle += 90
     angle = -angle
@@ -120,6 +121,233 @@ def draw_glyph2(font, text, polygon, vertAng=10, scale=1, width=512, height=512,
     img.paste(rotated_layer, (x_offset, y_offset), rotated_layer)
     img = np.expand_dims(np.array(img.convert('1')), axis=2).astype(np.float64)
     return img
+
+
+def draw_glyph3(
+    font, text, polygon, vertAng=10, scale=1, width=512, height=512, add_space=True, offset_angle=0
+):
+    enlarge_polygon = polygon * scale
+    rect = cv2.minAreaRect(enlarge_polygon)
+    box = cv2.boxPoints(rect)
+    box = np.int0(box)
+    w, h = rect[1]
+    angle = rect[2]
+    center = rect[0]
+    if angle < -45:
+        angle += 90
+    angle = -angle
+    if w < h:
+        angle += 90
+    angle += offset_angle
+
+    vert = False
+    # if abs(angle) % 90 < vertAng or abs(90 - abs(angle) % 90) % 90 < vertAng:
+    #     _w = max(box[:, 0]) - min(box[:, 0])
+    #     _h = max(box[:, 1]) - min(box[:, 1])
+    #     if _h >= _w:
+    #         vert = True
+    #         angle = 0
+
+    img = np.zeros((height * scale, width * scale, 3), np.uint8)
+    img = Image.fromarray(img)
+
+    # infer font size
+    image4ratio = Image.new("RGB", img.size, "white")
+    draw = ImageDraw.Draw(image4ratio)
+    _, _, _tw, _th = draw.textbbox(xy=(0, 0), text=text, font=font)
+    # print(_tw,_th)
+    text_w = min(w, h) * (_tw / _th)
+
+    # print("Text Width",text_w)
+    # print("w",w,"h",h)
+    print("angle", angle)
+
+    if text_w <= max(w, h):
+        # add space
+        if len(text) > 1 and not vert and add_space:
+            for i in range(1, 100):
+                text_space = insert_spaces(text, i)
+                _, _, _tw2, _th2 = draw.textbbox(xy=(0, 0), text=text_space, font=font)
+                if min(w, h) * (_tw2 / _th2) > max(w, h):
+                    break
+            text = insert_spaces(text, i - 1)
+        font_size = min(w, h) * 0.80
+    else:
+        shrink = 0.75 if vert else 0.85
+        font_size = min(w, h) / (text_w / max(w, h)) * shrink
+        # print("font_size",font_size)
+    new_font = font.font_variant(size=int(font_size))
+
+    left, top, right, bottom = new_font.getbbox(text)
+    text_width = right - left
+    text_height = bottom - top
+
+    if text_width > img.size[0]:
+        shrink = 0.8 if vert else 0.9
+        font_size = font_size * img.size[0] / text_width * shrink
+        new_font = font.font_variant(size=int(font_size))
+        left, top, right, bottom = new_font.getbbox(text)
+        text_width = right - left
+        text_height = bottom - top
+
+    print("text_width: ", text_width)
+
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    if not vert:
+        draw.text(
+            (img.size[0] // 2 - text_width // 2, img.size[1] // 2  - text_height // 2 - top),
+            text,
+            font=new_font,
+            fill=(255, 255, 255, 255),
+        )
+    # else:
+    #     x_s = min(box[:, 0]) + _w // 2 - text_height // 2
+    #     y_s = min(box[:, 1])
+    #     for c in text:
+    #         draw.text((x_s, y_s), c, font=new_font, fill=(255, 255, 255, 255))
+    #         _, _t, _, _b = new_font.getbbox(c)
+    #         y_s += _b
+    # layer.show("layer")
+    # rotated_layer = layer.rotate(angle, expand=1, center=(rect[0][0], rect[0][1]))
+    rotated_layer = layer.rotate(angle, expand=1)
+    T_t = np.array([[1, 0, img.size[0]/2-rect[0][0]], [0, 1, img.size[1]/2-rect[0][1]], [0, 0, 1]])
+    a,b,c = T_t[0]
+    d,e,f = T_t[1]
+    rotated_layer = rotated_layer.transform(rotated_layer.size,Image.AFFINE, (a,b,c,d,e,f))
+
+    x_offset = int((img.width - rotated_layer.width) / 2)
+    y_offset = int((img.height - rotated_layer.height) / 2)
+    img.paste(rotated_layer, (x_offset, y_offset), rotated_layer)
+    img = np.expand_dims(np.array(img.convert("1")), axis=2).astype(np.float64)
+    return img, angle, tuple([i//2 for i in center])
+
+
+def get_caption_pos(ori_caption, pos_idxs, prob=1.0, place_holder='*'):
+    idx2pos = {
+        0: " top left",
+        1: " top",
+        2: " top right",
+        3: " left",
+        4: random.choice([" middle", " center"]),
+        5: " right",
+        6: " bottom left",
+        7: " bottom",
+        8: " bottom right"
+    }
+    new_caption = ori_caption + random.choice(phrase_list)
+    pos = ''
+    for i in range(len(pos_idxs)):
+        if random.random() < prob and pos_idxs[i] > 0:
+            pos += place_holder + random.choice([' located', ' placed', ' positioned', '']) + random.choice([' at', ' in', ' on']) + idx2pos[pos_idxs[i]] + ', '
+        else:
+            pos += place_holder + ' , '
+    pos = pos[:-2] + '.'
+    new_caption += pos
+    return new_caption
+
+def draw_glyph4(
+    font, text, polygon, vertAng=10, scale=1, width=512, height=512, add_space=True, offset_angle=0
+):
+    enlarge_polygon = polygon * scale
+    rect = cv2.minAreaRect(enlarge_polygon)
+    box = cv2.boxPoints(rect)
+    box = np.int0(box)
+    w, h = rect[1]
+    angle = rect[2]
+    center = rect[0]
+    if angle < -45:
+        angle += 90
+    angle = -angle
+    if w < h:
+        angle += 90
+    angle += offset_angle
+
+    vert = False
+    # if abs(angle) % 90 < vertAng or abs(90 - abs(angle) % 90) % 90 < vertAng:
+    #     _w = max(box[:, 0]) - min(box[:, 0])
+    #     _h = max(box[:, 1]) - min(box[:, 1])
+    #     if _h >= _w:
+    #         vert = True
+    #         angle = 0
+
+    img = np.zeros((height * scale, width * scale, 3), np.uint8)
+    img = Image.fromarray(img)
+
+    # infer font size
+    image4ratio = Image.new("RGB", img.size, "white")
+    draw = ImageDraw.Draw(image4ratio)
+    _, _, _tw, _th = draw.textbbox(xy=(0, 0), text=text, font=font)
+    # print(_tw,_th)
+    text_w = min(w, h) * (_tw / _th)
+
+    # print("Text Width",text_w)
+    # print("w",w,"h",h)
+    print("angle", angle)
+
+    if text_w <= max(w, h):
+        # add space
+        if len(text) > 1 and not vert and add_space:
+            for i in range(1, 100):
+                text_space = insert_spaces(text, i)
+                _, _, _tw2, _th2 = draw.textbbox(xy=(0, 0), text=text_space, font=font)
+                if min(w, h) * (_tw2 / _th2) > max(w, h):
+                    break
+            text = insert_spaces(text, i - 1)
+        font_size = min(w, h) * 0.80
+    else:
+        shrink = 0.75 if vert else 0.85
+        font_size = min(w, h) / (text_w / max(w, h)) * shrink
+        # print("font_size",font_size)
+    new_font = font.font_variant(size=int(font_size))
+
+    left, top, right, bottom = new_font.getbbox(text)
+    text_width = right - left
+    text_height = bottom - top
+
+    if text_width > img.size[0]:
+        shrink = 0.8 if vert else 0.9
+        font_size = font_size * img.size[0] / text_width * shrink
+        new_font = font.font_variant(size=int(font_size))
+        left, top, right, bottom = new_font.getbbox(text)
+        text_width = right - left
+        text_height = bottom - top
+
+    print("text_width: ", text_width)
+
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    if not vert:
+        draw.text(
+            (img.size[0] // 2 - text_width // 2, img.size[1] // 2  - text_height // 2 - top),
+            text,
+            font=new_font,
+            fill=(255, 255, 255, 255),
+        )
+    # else:
+    #     x_s = min(box[:, 0]) + _w // 2 - text_height // 2
+    #     y_s = min(box[:, 1])
+    #     for c in text:
+    #         draw.text((x_s, y_s), c, font=new_font, fill=(255, 255, 255, 255))
+    #         _, _t, _, _b = new_font.getbbox(c)
+    #         y_s += _b
+    # layer.show("layer")
+    # rotated_layer = layer.rotate(angle, expand=1, center=(rect[0][0], rect[0][1]))
+    rotated_layer = layer.rotate(angle, expand=1)
+    # T_t = np.array([[1, 0, img.size[0]/2-rect[0][0]], [0, 1, img.size[1]/2-rect[0][1]], [0, 0, 1]])
+    # a,b,c = T_t[0]
+    # d,e,f = T_t[1]
+    # rotated_layer = rotated_layer.transform(rotated_layer.size,Image.AFFINE, (a,b,c,d,e,f))
+
+    x_offset = int((img.width - rotated_layer.width) / 2)
+    y_offset = int((img.height - rotated_layer.height) / 2)
+    img.paste(rotated_layer, (x_offset, y_offset), rotated_layer)
+    new_poly = np.array([[int(x_offset/2), int((y_offset+rotated_layer.height) / 2)],
+                [int((x_offset+rotated_layer.width)/2), int((y_offset+rotated_layer.height)/2)],
+                [int((x_offset+rotated_layer.width)/2), int(y_offset/2)],
+                [int(x_offset/2), int(y_offset/2)]])
+    img = np.expand_dims(np.array(img.convert("1")), axis=2).astype(np.float64)
+    return img, new_poly
 
 
 def get_caption_pos(ori_caption, pos_idxs, prob=1.0, place_holder='*'):

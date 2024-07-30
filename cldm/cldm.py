@@ -2,8 +2,10 @@ import einops
 import torch
 import torch as th
 import torch.nn as nn
+import torchvision
 import copy
 from easydict import EasyDict as edict
+import torchvision.transforms.functional as TF
 
 from ldm.modules.diffusionmodules.util import (
     conv_nd,
@@ -14,7 +16,7 @@ from ldm.modules.diffusionmodules.util import (
 
 from einops import rearrange, repeat
 from torchvision.utils import make_grid
-from ldm.modules.attention import SpatialTransformer
+from ldm.modules.attention import SpatialTransformer,MemoryEfficientCrossAttention
 from ldm.modules.diffusionmodules.openaimodel import UNetModel, TimestepEmbedSequential, ResBlock, Downsample, AttentionBlock
 from ldm.models.diffusion.ddpm import LatentDiffusion
 from ldm.util import log_txt_as_img, exists, instantiate_from_config
@@ -22,6 +24,8 @@ from ldm.util import log_txt_as_img, exists, instantiate_from_config
 from cldm.ddim_hacked import DDIMSampler
 from ldm.modules.distributions.distributions import DiagonalGaussianDistribution
 from .recognizer import TextRecognizer, create_predictor
+from t3_dataset import draw_glyph3
+from util import arr2tensor,pca_compute
 
 
 def count_parameters(model):
@@ -29,8 +33,8 @@ def count_parameters(model):
 
 
 class ControlledUnetModel(UNetModel):
-    def forward(self, x, timesteps=None, context=None, control=None, only_mid_control=False, **kwargs):
-        hs = []
+    def forward(self, x, timesteps=None, context=None, control=None, only_mid_control=False, info=None, **kwargs):
+        hs = [] # residual
         with torch.no_grad():
             t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
             if self.use_fp16:
@@ -39,6 +43,7 @@ class ControlledUnetModel(UNetModel):
             h = x.type(self.dtype)
             for module in self.input_blocks:
                 h = module(h, emb, context)
+                # print(h.shape)
                 hs.append(h)
             h = self.middle_block(h, emb, context)
 
@@ -78,11 +83,11 @@ class ControlNet(nn.Module):
             use_scale_shift_norm=False,
             resblock_updown=False,
             use_new_attention_order=False,
-            use_spatial_transformer=False,  # custom transformer support
+            use_spatial_transformer=False,  # custom transformer support. True in AnyText
             transformer_depth=1,  # custom transformer support
             context_dim=None,  # custom transformer support
             n_embed=None,  # custom support for prediction of discrete ids into codebook of first stage vq model
-            legacy=True,
+            legacy=True, # False in AnyText
             disable_self_attentions=None,
             num_attention_blocks=None,
             disable_middle_self_attn=False,
@@ -315,6 +320,9 @@ class ControlNet(nn.Module):
         return TimestepEmbedSequential(zero_module(conv_nd(self.dims, channels, channels, 1, padding=0)))
 
     def forward(self, x, hint, text_info, timesteps, context, **kwargs):
+        """
+        context is conditioning for the model
+        """
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
         if self.use_fp16:
             t_emb = t_emb.half()
@@ -326,15 +334,19 @@ class ControlNet(nn.Module):
         positions = torch.cat(text_info['positions'], dim=1).sum(dim=1, keepdim=True)
         enc_glyph = self.glyph_block(glyphs, emb, context)
         enc_pos = self.position_block(positions, emb, context)
-        guided_hint = self.fuse_block(torch.cat([enc_glyph, enc_pos, text_info['masked_x']], dim=1))
+        guided_hint = self.fuse_block(torch.cat([enc_glyph, enc_pos, text_info['masked_x']], dim=1)) # 4,320,64,64
 
         outs = []
 
         h = x.type(self.dtype)
         for module, zero_conv in zip(self.input_blocks, self.zero_convs):
+            # if isinstance(module, TimestepEmbedSequential):
+            #     for n,m in module.named_modules():
+            #         if "attn1" in n.split(".")[-1]:
+            #             print(m.query_dim)
             if guided_hint is not None:
-                h = module(h, emb, context)
-                h += guided_hint
+                h = module(h, emb, context) # shape batchsize, 320, 64, 64
+                h += guided_hint    # Auxiliary Latent plus Latent
                 guided_hint = None
             else:
                 h = module(h, emb, context)
@@ -438,14 +450,17 @@ class ControlLDM(LatentDiffusion):
 
     def apply_model(self, x_noisy, t, cond, *args, **kwargs):
         assert isinstance(cond, dict)
-        diffusion_model = self.model.diffusion_model
+        diffusion_model = self.model.diffusion_model  # cldm.cldm.ControlledUnetModel
         _cond = torch.cat(cond['c_crossattn'], 1)
         _hint = torch.cat(cond['c_concat'], 1)
         if self.use_fp16:
             x_noisy = x_noisy.half()
-        control = self.control_model(x=x_noisy, timesteps=t, context=_cond, hint=_hint, text_info=cond['text_info'])
+        control = self.control_model(x=x_noisy, timesteps=t, context=_cond, hint=_hint, text_info=cond['text_info']) # cldm.cldm.ControlNet
+        # control_for_show = control[-1][0]
+        # control_for_show = pca_compute(control_for_show)
+        # control_for_show.save(f"Result/{t[0]}.png")
         control = [c * scale for c, scale in zip(control, self.control_scales)]
-        eps = diffusion_model(x=x_noisy, timesteps=t, context=_cond, control=control, only_mid_control=self.only_mid_control)
+        eps = diffusion_model(x=x_noisy, timesteps=t, context=_cond, control=control, only_mid_control=self.only_mid_control, info=cond['text_info'])
 
         return eps
 
@@ -467,7 +482,10 @@ class ControlLDM(LatentDiffusion):
                 else:
                     cond_txt = c
                 if self.embedding_manager is not None:
-                    cond_txt = self.cond_stage_model.encode(cond_txt, embedding_manager=self.embedding_manager)
+                    cond_txt = self.cond_stage_model.encode(
+                        cond_txt,
+                        embedding_manager=self.embedding_manager,
+                    )
                 else:
                     cond_txt = self.cond_stage_model.encode(cond_txt)
                 if isinstance(c, dict):

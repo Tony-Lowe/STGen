@@ -325,6 +325,18 @@ class FrozenCLIPEmbedderT3(AbstractEncoder):
             input_ids = input_ids.view(-1, input_shape[-1])
             hidden_states = self.embeddings(input_ids=input_ids, position_ids=position_ids, embedding_manager=embedding_manager)
             bsz, seq_len = input_shape
+            # place_holder = '*'
+            # place_holder_encoding = self.tokenizer(
+            #     place_holder,
+            #     truncation=True,
+            #     max_length=77,
+            #     return_length=True,
+            #     return_overflowing_tokens=False,
+            #     padding="max_length",
+            #     return_tensors="pt",
+            # )
+            # place_holder_token = place_holder_encoding["input_ids"][0,1]
+            # idx = input_ids == place_holder_token.to(self.device)
             # CLIP's text model uses causal mask, prepare it here.
             # https://github.com/openai/CLIP/blob/cfcffb90e69f37bf2ff1e988237a0fbe41f33c04/clip/model.py#L324
             causal_attention_mask = _build_causal_attention_mask(bsz, seq_len, hidden_states.dtype).to(
@@ -343,6 +355,7 @@ class FrozenCLIPEmbedderT3(AbstractEncoder):
                 return_dict=return_dict,
             )
             last_hidden_state = self.final_layer_norm(last_hidden_state)
+            # last_hidden_state[:,idx] = last_hidden_state[:,idx] * 2
             return last_hidden_state
 
         self.transformer.text_model.forward = text_encoder_forward.__get__(self.transformer.text_model)
@@ -379,10 +392,29 @@ class FrozenCLIPEmbedderT3(AbstractEncoder):
                                         return_overflowing_tokens=False, padding="longest", return_tensors="pt")
         input_ids = batch_encoding["input_ids"]
         tokens_list = self.split_chunks(input_ids)
+        place_holder = '*'
+        place_holder_encoding = self.tokenizer(
+            place_holder,
+            truncation=True,
+            max_length=77,
+            return_length=True,
+            return_overflowing_tokens=False,
+            padding="max_length",
+            return_tensors="pt",
+        )
+        place_holder_token = place_holder_encoding["input_ids"][0, 1].to(self.device)
         z_list = []
         for tokens in tokens_list:
             tokens = tokens.to(self.device)
+            idx = tokens == place_holder_token
+            # print(idx)
             _z = self.transformer(input_ids=tokens, **kwargs)
+            # print(_z.shape)
+            times = kwargs["embedding_manager"].times
+            times1 = kwargs["embedding_manager"].times1
+            # print(times)
+            _z[idx] = _z[idx] * times
+            _z[~idx] = _z[~idx] * times1
             z_list += [_z]
         return torch.cat(z_list, dim=1)
 

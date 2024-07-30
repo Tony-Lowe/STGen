@@ -198,13 +198,15 @@ class MemoryEfficientCrossAttention(nn.Module):
     # https://github.com/MatthieuTPHR/diffusers/blob/d80b531ff8060ec1ea982b65a1b8df70f73aa67c/src/diffusers/models/attention.py#L223
     def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.0):
         super().__init__()
-        print(f"Setting up {self.__class__.__name__}. Query dim is {query_dim}, context_dim is {context_dim} and using "
+        print(f"Setting up {self.__class__.__name__}. Query dim is {query_dim}, context_dim is {context_dim}, dim_head is {dim_head} and using "
               f"{heads} heads.")
         inner_dim = dim_head * heads
+        self.context_dim = context_dim # Adding for better Init
         context_dim = default(context_dim, query_dim)
-
+        self.query_dim = query_dim # Adding a better dim return
         self.heads = heads
         self.dim_head = dim_head
+        self.dropout = dropout  # For better init
 
         self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
         self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
@@ -228,7 +230,10 @@ class MemoryEfficientCrossAttention(nn.Module):
             .contiguous(),
             (q, k, v),
         )
-
+        # print(q.shape)
+        # qk_for_show = q @ k.transpose(1, 2)
+        # qk_for_show = qk_for_show.reshape(b, self.heads, qk_for_show.shape[1], qk_for_show.shape[2]).sum(dim=1, keepdim=True).squeeze()
+        # qk_for_show = (qk_for_show[0]-qk_for_show[0].min())/(qk_for_show[0].max()-qk_for_show[0].min())
         # actually compute the attention, what we cannot get enough of
         out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=None, op=self.attention_op)
 
@@ -265,11 +270,11 @@ class BasicTransformerBlock(nn.Module):
         self.norm3 = nn.LayerNorm(dim)
         self.checkpoint = checkpoint
 
-    def forward(self, x, context=None):
-        return checkpoint(self._forward, (x, context), self.parameters(), self.checkpoint)
+    def forward(self, x, context=None, mask=None):
+        return checkpoint(self._forward, (x, context, mask), self.parameters(), self.checkpoint)
 
-    def _forward(self, x, context=None):
-        x = self.attn1(self.norm1(x), context=context if self.disable_self_attn else None) + x
+    def _forward(self, x, context=None, mask=None):
+        x = self.attn1(self.norm1(x), context=context if self.disable_self_attn else None, mask=mask) + x
         x = self.attn2(self.norm2(x), context=context) + x
         x = self.ff(self.norm3(x)) + x
         return x
@@ -318,7 +323,7 @@ class SpatialTransformer(nn.Module):
             self.proj_out = zero_module(nn.Linear(in_channels, inner_dim))
         self.use_linear = use_linear
 
-    def forward(self, x, context=None):
+    def forward(self, x, context=None, mask=None):
         # note: if no context is given, cross-attention defaults to self-attention
         if not isinstance(context, list):
             context = [context]
@@ -331,11 +336,10 @@ class SpatialTransformer(nn.Module):
         if self.use_linear:
             x = self.proj_in(x)
         for i, block in enumerate(self.transformer_blocks):
-            x = block(x, context=context[i])
+            x = block(x, context=context[i], mask=mask)
         if self.use_linear:
             x = self.proj_out(x)
         x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w).contiguous()
         if not self.use_linear:
             x = self.proj_out(x)
         return x + x_in
-

@@ -147,3 +147,8 @@ dmypy.json
 /SaveImages/
 /*.png
 font/*.ttf
+Test/*
+SaveImages1/*
+SaveImage/*
+SaveImage1/*
+Result/*

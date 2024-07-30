@@ -1,12 +1,14 @@
 name: anytext
 channels:
   - pytorch
+  - nvidia
+  - conda-forge
   - defaults
 dependencies:
   - python=3.10.6
-  - pip=23.0.1
+  - pip
   - cudatoolkit=11.7
-  - numpy=1.23.3
+  - numpy=1.23.5
   - cython==0.29.33
   - pip:
       - Pillow==9.5.0
@@ -29,7 +31,7 @@ dependencies:
       - addict==2.4.0
       - yapf==0.32.0
       - safetensors==0.4.0
-      - basicsr==1.4.2
+      - basicsr
       - jieba==0.42.1
       - modelscope==1.10.0
       - tensorflow==2.13.0
