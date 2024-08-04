@@ -35,7 +35,7 @@ model:
         placeholder_string: '*'
 
     control_stage_config:
-      target: cldm.cldm_r.ControlNet_r
+      target: cldm.cldm_masa.ControlNet_masa
       params:
         image_size: 32 # unused
         in_channels: 4
@@ -51,12 +51,9 @@ model:
         context_dim: 768
         use_checkpoint: True
         legacy: False
-        attn_com: False
-        use_mask: False
-        show_ca: False
 
     unet_config:
-      target: cldm.cldm_r.ControlledUnetModel_r
+      target: cldm.cldm_masa.ControlledUnetModel_masa
       params:
         image_size: 32 # unused
         in_channels: 4
@@ -71,9 +68,8 @@ model:
         context_dim: 768
         use_checkpoint: True
         legacy: False
-        attn_com: True
-        use_mask: True
-        show_ca: False
+        start_step: 10
+        start_layer: 10
 
     first_stage_config:
       target: ldm.models.autoencoder.AutoencoderKL

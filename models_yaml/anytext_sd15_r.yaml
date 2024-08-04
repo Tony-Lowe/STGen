@@ -52,7 +52,7 @@ model:
         use_checkpoint: True
         legacy: False
         attn_com: True
-        use_mask: False
+        use_mask: True
 
     unet_config:
       target: cldm.cldm.ControlledUnetModel
