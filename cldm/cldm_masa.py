@@ -1,4 +1,5 @@
 from typing import Any, Optional
+from scipy import spatial
 from sympy import use
 import torch
 import torch.nn as nn
@@ -9,10 +10,17 @@ import numpy as np
 from tqdm import tqdm
 from functools import reduce
 from cldm.cldm import ControlLDM,ControlNet,ControlledUnetModel, timestep_embedding
+from ldm.modules.diffusionmodules.util import (
+    make_ddim_sampling_parameters,
+    make_ddim_timesteps,
+    noise_like,
+    extract_into_tensor,
+)
 from cldm.ddim_hacked import DDIMSampler
 from cldm.ctrl import AttentionStore
 from ldm.modules.diffusionmodules.openaimodel import (
     UNetModel,
+    TimestepBlock,
     TimestepEmbedSequential,
     ResBlock,
     Downsample,
@@ -44,6 +52,25 @@ def convert_module_to_f16(x):
 
 def convert_module_to_f32(x):
     pass
+
+
+class myTimestepEmbedSequential(TimestepEmbedSequential):
+    """
+    A sequential module that passes timestep embeddings to the children that
+    support it as an extra input.
+    """
+
+    def forward(self, x, emb, context=None, mask=None, use_masa=False):
+        for layer in self:
+            if isinstance(layer, TimestepBlock):
+                x = layer(x, emb)
+            elif isinstance(layer, SpatialTransformer_masa):
+                x = layer(x, context, mask, use_masa)
+            elif isinstance(layer, SpatialTransformer):
+                x = layer(x, context, mask)
+            else:
+                x = layer(x)
+        return x
 
 
 class myDDIMSampler(DDIMSampler):
@@ -133,19 +160,8 @@ class myDDIMSampler(DDIMSampler):
                 corrector_kwargs=corrector_kwargs,
                 unconditional_guidance_scale=unconditional_guidance_scale,
                 unconditional_conditioning=unconditional_conditioning,
-                dynamic_threshold=dynamic_threshold,
+                dynamic_threshold=dynamic_threshold,total_steps=total_steps
             )
-            # Saving CA
-            # if cond["text_info"]["attn_ctrl"] is not None:
-            #     attn_map = aggregate_attention(
-            #         cond["text_info"]["attn_ctrl"], res=16, from_where=[16]
-            #     )  # B, res, res, 77
-            #     pil_images = show_ca(
-            #         prompt=cond["text_info"]["prompt"],
-            #         attention_maps=attn_map,
-            #         tokenizer=self.model.cond_stage_model.tokenizer,
-            #     )
-            #     pil_images.save(f"Result/Test/attn/{i}.png")
             img, pred_x0 = outs
             if callback:
                 callback(i)
@@ -159,25 +175,95 @@ class myDDIMSampler(DDIMSampler):
 
         return img, intermediates
 
+    @torch.no_grad()
+    def p_sample_ddim(
+        self,
+        x,
+        c,
+        t,
+        index,
+        repeat_noise=False,
+        use_original_steps=False,
+        quantize_denoised=False,
+        temperature=1.0,
+        noise_dropout=0.0,
+        score_corrector=None,
+        corrector_kwargs=None,
+        unconditional_guidance_scale=1.0,
+        unconditional_conditioning=None,
+        dynamic_threshold=None,
+        total_steps=20,
+    ):
+        b, *_, device = *x.shape, x.device
+        c["text_info"]["cur_step"]=total_steps-index-1
+        if unconditional_conditioning is None or unconditional_guidance_scale == 1.0:
+            model_output = self.model.apply_model(x, t, c)
+        else:
+            model_uncond = self.model.apply_model(x, t, unconditional_conditioning)
+            model_t = self.model.apply_model(x, t, c)
+            model_output = model_uncond + unconditional_guidance_scale * (
+                model_t - model_uncond
+            )
 
-class Mycldm(ControlLDM):
-    def apply_model(self, x_noisy, t, cond, *args, **kwargs):
-        assert isinstance(cond, dict)
-        diffusion_model = self.model.diffusion_model  # cldm.cldm.ControlledUnetModel
-        _cond = torch.cat(cond['c_crossattn'], 1)
-        _hint = torch.cat(cond['c_concat'], 1)
-        if self.use_fp16:
-            x_noisy = x_noisy.half()
-        control = self.control_model(x=x_noisy, timesteps=t, context=_cond, hint=_hint, text_info=cond['text_info']) # cldm.cldm.ControlNet
-        # control_for_show = control[-1][0]
-        # control_for_show = pca_compute(control_for_show)
-        # control_for_show.save(f"Result/{t[0]}.png")
-        control = [c * scale for c, scale in zip(control, self.control_scales)]
-        eps = diffusion_model(x=x_noisy, timesteps=t, context=_cond, control=control, only_mid_control=self.only_mid_control, info=cond['text_info'])
+        if self.model.parameterization == "v":  # Using  default eps in anytext
+            e_t = self.model.predict_eps_from_z_and_v(x, t, model_output)
+        else:
+            e_t = model_output
 
-        return eps
+        if score_corrector is not None:  # is None in AnyText
+            assert self.model.parameterization == "eps", "not implemented"
+            e_t = score_corrector.modify_score(
+                self.model, e_t, x, t, c, **corrector_kwargs
+            )
 
-class ControlledUnetModel_r(nn.Module):
+        alphas = self.model.alphas_cumprod if use_original_steps else self.ddim_alphas
+        alphas_prev = (
+            self.model.alphas_cumprod_prev
+            if use_original_steps
+            else self.ddim_alphas_prev
+        )
+        sqrt_one_minus_alphas = (
+            self.model.sqrt_one_minus_alphas_cumprod
+            if use_original_steps
+            else self.ddim_sqrt_one_minus_alphas
+        )
+        sigmas = (
+            self.model.ddim_sigmas_for_original_num_steps
+            if use_original_steps
+            else self.ddim_sigmas
+        )
+        # select parameters corresponding to the currently considered timestep
+        a_t = torch.full((b, 1, 1, 1), alphas[index], device=device)
+        a_prev = torch.full((b, 1, 1, 1), alphas_prev[index], device=device)
+        sigma_t = torch.full((b, 1, 1, 1), sigmas[index], device=device)
+        sqrt_one_minus_at = torch.full(
+            (b, 1, 1, 1), sqrt_one_minus_alphas[index], device=device
+        )
+
+        # current prediction for x_0
+        if self.model.parameterization != "v":  # Using  default eps in anytext
+            pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
+        else:
+            pred_x0 = self.model.predict_start_from_z_and_v(
+                x, t, model_output
+            )  # remove the noise from the prediction
+
+        if quantize_denoised:  # False in AnyText
+            pred_x0, _, *_ = self.model.first_stage_model.quantize(pred_x0)
+
+        if dynamic_threshold is not None:
+            raise NotImplementedError()
+
+        # direction pointing to x_t
+        dir_xt = (1.0 - a_prev - sigma_t**2).sqrt() * e_t
+        noise = sigma_t * noise_like(x.shape, device, repeat_noise) * temperature
+        if noise_dropout > 0.0:
+            noise = torch.nn.functional.dropout(noise, p=noise_dropout)
+        x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
+        return x_prev, pred_x0
+
+
+class ControlledUnetModel_masa(nn.Module):
     def __init__(
         self,
         image_size,
@@ -187,7 +273,7 @@ class ControlledUnetModel_r(nn.Module):
         num_res_blocks,
         attention_resolutions,
         dropout=0,
-        channel_mult=(1, 2, 4, 8), #[1,2,4,4]
+        channel_mult=(1, 2, 4, 8),
         conv_resample=True,
         dims=2,
         num_classes=None,
@@ -208,9 +294,8 @@ class ControlledUnetModel_r(nn.Module):
         num_attention_blocks=None,
         disable_middle_self_attn=False,
         use_linear_in_transformer=False,
-        attn_com=True,
-        use_mask=True,
-        show_ca=False,
+        start_step=5,
+        start_layer=10,
     ):
         super().__init__()
         if use_spatial_transformer:
@@ -230,13 +315,14 @@ class ControlledUnetModel_r(nn.Module):
 
         if num_head_channels == -1:
             assert num_heads != -1, 'Either num_heads or num_head_channels has to be set'
-
+        self.start_step = start_step
+        self.layer_idx = 0
         self.image_size = image_size
         self.in_channels = in_channels
         self.model_channels = model_channels
         self.out_channels = out_channels
         if isinstance(num_res_blocks, int):
-            self.num_res_blocks = len(channel_mult) * [num_res_blocks] #[2,2,2,2]
+            self.num_res_blocks = len(channel_mult) * [num_res_blocks]
         else:
             if len(num_res_blocks) != len(channel_mult):
                 raise ValueError("provide num_res_blocks either as an int (globally constant) or "
@@ -281,10 +367,10 @@ class ControlledUnetModel_r(nn.Module):
             else:
                 raise ValueError()
         # %----------------------------------------------------------------------------------%
-        # Downsample Blocks: CONTAIN 8 ATTENTION BLOCKS, 16 LAYERS OF ATTENTION LAYERS
+        # Downsample Blocks
         self.input_blocks = nn.ModuleList(
             [
-                TimestepEmbedSequential(
+                myTimestepEmbedSequential(
                     conv_nd(dims, in_channels, model_channels, 3, padding=1)
                 )
             ]
@@ -293,8 +379,8 @@ class ControlledUnetModel_r(nn.Module):
         input_block_chans = [model_channels]
         ch = model_channels
         ds = 1
-        for level, mult in enumerate(channel_mult): # 4
-            for nr in range(self.num_res_blocks[level]): # 2
+        for level, mult in enumerate(channel_mult):
+            for nr in range(self.num_res_blocks[level]):
                 layers = [
                     ResBlock(
                         ch,
@@ -307,7 +393,7 @@ class ControlledUnetModel_r(nn.Module):
                     )
                 ]
                 ch = mult * model_channels
-                if ds in attention_resolutions: # Because of 8>4, so there's only 6 transformer blocks in the input blocks
+                if ds in attention_resolutions:
                     if num_head_channels == -1:
                         dim_head = ch // num_heads
                     else:
@@ -329,19 +415,20 @@ class ControlledUnetModel_r(nn.Module):
                                 num_heads=num_heads,
                                 num_head_channels=dim_head,
                                 use_new_attention_order=use_new_attention_order,
-                            ) if not use_spatial_transformer else SpatialTransformer(
+                            ) if not use_spatial_transformer else SpatialTransformer_masa(
                                 ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim,
                                 disable_self_attn=disabled_sa, use_linear=use_linear_in_transformer,
-                                use_checkpoint=use_checkpoint
+                                use_checkpoint=use_checkpoint,attn_com=(self.layer_idx>=start_layer)
                             )
                         )
-                self.input_blocks.append(TimestepEmbedSequential(*layers))
+                        self.layer_idx += 1
+                self.input_blocks.append(myTimestepEmbedSequential(*layers))
                 self._feature_size += ch
                 input_block_chans.append(ch)
             if level != len(channel_mult) - 1:
                 out_ch = ch
                 self.input_blocks.append(
-                    TimestepEmbedSequential(
+                    myTimestepEmbedSequential(
                         ResBlock(
                             ch,
                             time_embed_dim,
@@ -372,8 +459,8 @@ class ControlledUnetModel_r(nn.Module):
             # num_heads = 1
             dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
         # %----------------------------------------------------------------------------------%
-        # Middle block: CONTAIN 1 ATTENTION BLOCKS, 2 ATTENTION LAYERS
-        self.middle_block = TimestepEmbedSequential(
+        # Middle block
+        self.middle_block = myTimestepEmbedSequential(
             ResBlock(
                 ch,
                 time_embed_dim,
@@ -388,10 +475,10 @@ class ControlledUnetModel_r(nn.Module):
                 num_heads=num_heads,
                 num_head_channels=dim_head,
                 use_new_attention_order=use_new_attention_order,
-            ) if not use_spatial_transformer else SpatialTransformer(  # always uses a self-attn
+            ) if not use_spatial_transformer else SpatialTransformer_masa(  # always uses a self-attn
                             ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim,
                             disable_self_attn=disable_middle_self_attn, use_linear=use_linear_in_transformer,
-                            use_checkpoint=use_checkpoint
+                            use_checkpoint=use_checkpoint,attn_com=(self.layer_idx>=start_layer),
                         ),
             ResBlock(
                 ch,
@@ -402,12 +489,13 @@ class ControlledUnetModel_r(nn.Module):
                 use_scale_shift_norm=use_scale_shift_norm,
             ),
         )
+        self.layer_idx += 1
         self._feature_size += ch
         # %----------------------------------------------------------------------------------%
-        # Upsample Block # CONTAIN 9 ATTENTION BLOCKS, 18 LAYERS OF ATTENTION LAYERS
+        # Upsample Block
         self.output_blocks = nn.ModuleList([])
-        for level, mult in list(enumerate(channel_mult))[::-1]: # 3
-            for i in range(self.num_res_blocks[level] + 1): # 2+1
+        for level, mult in list(enumerate(channel_mult))[::-1]:
+            for i in range(self.num_res_blocks[level] + 1):
                 ich = input_block_chans.pop()
                 layers = [
                     ResBlock(
@@ -443,12 +531,13 @@ class ControlledUnetModel_r(nn.Module):
                                 num_heads=num_heads_upsample,
                                 num_head_channels=dim_head,
                                 use_new_attention_order=use_new_attention_order,
-                            ) if not use_spatial_transformer else SpatialTransformer_r(
+                            ) if not use_spatial_transformer else SpatialTransformer_masa(
                                 ch, num_heads, dim_head, depth=transformer_depth, context_dim=context_dim,
                                 disable_self_attn=disabled_sa, use_linear=use_linear_in_transformer,
-                                use_checkpoint=use_checkpoint,attn_com=attn_com,use_mask=use_mask,show_ca=show_ca
+                                use_checkpoint=use_checkpoint,attn_com=(self.layer_idx>=start_layer)
                             )
                         )
+                        self.layer_idx+=1
                 if level and i == self.num_res_blocks[level]:
                     out_ch = ch
                     layers.append(
@@ -466,7 +555,7 @@ class ControlledUnetModel_r(nn.Module):
                         else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)
                     )
                     ds //= 2
-                self.output_blocks.append(TimestepEmbedSequential(*layers))
+                self.output_blocks.append(myTimestepEmbedSequential(*layers))
                 self._feature_size += ch
         # %----------------------------------------------------------------------------------%
 
@@ -500,7 +589,8 @@ class ControlledUnetModel_r(nn.Module):
 
     def forward(self, x, timesteps=None, context=None, control=None, only_mid_control=False, info=None, **kwargs):
         hs = [] # residual
-        mask = info["attn_mask"]
+        mask = info['attn_mask']
+        cur_step = info["cur_step"]
         # attn_ctrl = info["attn_ctrl"]
         with torch.no_grad():
             t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
@@ -509,10 +599,10 @@ class ControlledUnetModel_r(nn.Module):
             emb = self.time_embed(t_emb)
             h = x.type(self.dtype)
             for module in self.input_blocks:
-                h = module(h, emb, context)
+                h = module(h, emb, context, mask, cur_step>=self.start_step)
                 # print(h.shape)
                 hs.append(h)
-            h = self.middle_block(h, emb, context)
+            h = self.middle_block(h, emb, context, mask, cur_step >= self.start_step)
 
         if control is not None:
             h += control.pop()
@@ -523,322 +613,12 @@ class ControlledUnetModel_r(nn.Module):
             else:
                 h = torch.cat([h, hs.pop() + control.pop()], dim=1)
             # h = module(h, emb, context, mask, attn_ctrl)
-            h = module(h, emb, context, mask)
+            h = module(h, emb, context, mask, cur_step >= self.start_step)
 
         h = h.type(x.dtype)
         return self.out(h)
 
-class ControlNet_r(nn.Module):
-    def __init__(
-            self,
-            image_size,
-            in_channels,
-            model_channels,
-            glyph_channels,
-            position_channels,
-            num_res_blocks,
-            attention_resolutions,
-            dropout=0,
-            channel_mult=(1, 2, 4, 8),
-            conv_resample=True,
-            dims=2,
-            use_checkpoint=False,
-            use_fp16=False,
-            num_heads=-1,
-            num_head_channels=-1,
-            num_heads_upsample=-1,
-            use_scale_shift_norm=False,
-            resblock_updown=False,
-            use_new_attention_order=False,
-            use_spatial_transformer=False,  # custom transformer support
-            transformer_depth=1,  # custom transformer support
-            context_dim=None,  # custom transformer support
-            n_embed=None,  # custom support for prediction of discrete ids into codebook of first stage vq model
-            legacy=True,
-            disable_self_attentions=None,
-            num_attention_blocks=None,
-            disable_middle_self_attn=False,
-            use_linear_in_transformer=False,
-            attn_com=False,
-            use_mask=False,
-            show_ca=False,
-    ):
-        super().__init__()
-        self.attn_com = attn_com
-        self.use_mask = use_mask
-        if use_spatial_transformer:
-            assert (
-                context_dim is not None
-            ), "Fool!! You forgot to include the dimension of your cross-attention conditioning..."
-
-        if context_dim is not None:
-            assert (
-                use_spatial_transformer
-            ), "Fool!! You forgot to use the spatial transformer for your cross-attention conditioning..."
-            from omegaconf.listconfig import ListConfig
-
-            if type(context_dim) == ListConfig:
-                context_dim = list(context_dim)
-
-        if num_heads_upsample == -1:
-            num_heads_upsample = num_heads
-
-        if num_heads == -1:
-            assert (
-                num_head_channels != -1
-            ), "Either num_heads or num_head_channels has to be set"
-
-        if num_head_channels == -1:
-            assert (
-                num_heads != -1
-            ), "Either num_heads or num_head_channels has to be set"
-        self.dims = dims
-        self.image_size = image_size
-        self.in_channels = in_channels
-        self.model_channels = model_channels
-        if isinstance(num_res_blocks, int):
-            self.num_res_blocks = len(channel_mult) * [num_res_blocks]
-        else:
-            if len(num_res_blocks) != len(channel_mult):
-                raise ValueError(
-                    "provide num_res_blocks either as an int (globally constant) or "
-                    "as a list/tuple (per-level) with the same length as channel_mult"
-                )
-            self.num_res_blocks = num_res_blocks
-        if disable_self_attentions is not None:
-            # should be a list of booleans, indicating whether to disable self-attention in TransformerBlocks or not
-            assert len(disable_self_attentions) == len(channel_mult)
-        if num_attention_blocks is not None:
-            assert len(num_attention_blocks) == len(self.num_res_blocks)
-            assert all(
-                map(
-                    lambda i: self.num_res_blocks[i] >= num_attention_blocks[i],
-                    range(len(num_attention_blocks)),
-                )
-            )
-            print(
-                f"Constructor of UNetModel received num_attention_blocks={num_attention_blocks}. "
-                f"This option has LESS priority than attention_resolutions {attention_resolutions}, "
-                f"i.e., in cases where num_attention_blocks[i] > 0 but 2**i not in attention_resolutions, "
-                f"attention will still not be set."
-            )
-        self.attention_resolutions = attention_resolutions
-        self.dropout = dropout
-        self.channel_mult = channel_mult
-        self.conv_resample = conv_resample
-        self.use_checkpoint = use_checkpoint
-        self.use_fp16 = use_fp16
-        self.dtype = torch.float16 if use_fp16 else torch.float32
-        self.num_heads = num_heads
-        self.num_head_channels = num_head_channels
-        self.num_heads_upsample = num_heads_upsample
-        self.predict_codebook_ids = n_embed is not None
-
-        time_embed_dim = model_channels * 4
-        self.time_embed = nn.Sequential(
-            linear(model_channels, time_embed_dim),
-            nn.SiLU(),
-            linear(time_embed_dim, time_embed_dim),
-        )
-
-        self.input_blocks = nn.ModuleList(
-            [
-                TimestepEmbedSequential(
-                    conv_nd(dims, in_channels, model_channels, 3, padding=1)
-                )
-            ]
-        )
-        self.zero_convs = nn.ModuleList([self.make_zero_conv(model_channels)])
-
-        self.glyph_block = TimestepEmbedSequential(
-            conv_nd(dims, glyph_channels, 8, 3, padding=1),
-            nn.SiLU(),
-            conv_nd(dims, 8, 8, 3, padding=1),
-            nn.SiLU(),
-            conv_nd(dims, 8, 16, 3, padding=1, stride=2),
-            nn.SiLU(),
-            conv_nd(dims, 16, 16, 3, padding=1),
-            nn.SiLU(),
-            conv_nd(dims, 16, 32, 3, padding=1, stride=2),
-            nn.SiLU(),
-            conv_nd(dims, 32, 32, 3, padding=1),
-            nn.SiLU(),
-            conv_nd(dims, 32, 96, 3, padding=1, stride=2),
-            nn.SiLU(),
-            conv_nd(dims, 96, 96, 3, padding=1),
-            nn.SiLU(),
-            conv_nd(dims, 96, 256, 3, padding=1, stride=2),
-            nn.SiLU(),
-        )
-
-        self.position_block = TimestepEmbedSequential(
-            conv_nd(dims, position_channels, 8, 3, padding=1),
-            nn.SiLU(),
-            conv_nd(dims, 8, 8, 3, padding=1),
-            nn.SiLU(),
-            conv_nd(dims, 8, 16, 3, padding=1, stride=2),
-            nn.SiLU(),
-            conv_nd(dims, 16, 16, 3, padding=1),
-            nn.SiLU(),
-            conv_nd(dims, 16, 32, 3, padding=1, stride=2),
-            nn.SiLU(),
-            conv_nd(dims, 32, 32, 3, padding=1),
-            nn.SiLU(),
-            conv_nd(dims, 32, 64, 3, padding=1, stride=2),
-            nn.SiLU(),
-        )
-
-        self.fuse_block = zero_module(
-            conv_nd(dims, 256 + 64 + 4, model_channels, 3, padding=1)
-        )
-
-        self._feature_size = model_channels
-        input_block_chans = [model_channels]
-        ch = model_channels
-        ds = 1
-        for level, mult in enumerate(channel_mult):
-            for nr in range(self.num_res_blocks[level]):
-                layers = [
-                    ResBlock(
-                        ch,
-                        time_embed_dim,
-                        dropout,
-                        out_channels=mult * model_channels,
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                    )
-                ]
-                ch = mult * model_channels
-                if ds in attention_resolutions:
-                    if num_head_channels == -1:
-                        dim_head = ch // num_heads
-                    else:
-                        num_heads = ch // num_head_channels
-                        dim_head = num_head_channels
-                    if legacy:
-                        # num_heads = 1
-                        dim_head = (
-                            ch // num_heads
-                            if use_spatial_transformer
-                            else num_head_channels
-                        )
-                    if exists(disable_self_attentions):
-                        disabled_sa = disable_self_attentions[level]
-                    else:
-                        disabled_sa = False
-
-                    if (
-                        not exists(num_attention_blocks)
-                        or nr < num_attention_blocks[level]
-                    ):
-                        layers.append(
-                            AttentionBlock(
-                                ch,
-                                use_checkpoint=use_checkpoint,
-                                num_heads=num_heads,
-                                num_head_channels=dim_head,
-                                use_new_attention_order=use_new_attention_order,
-                            )
-                            if not use_spatial_transformer
-                            else SpatialTransformer_r(
-                                ch,
-                                num_heads,
-                                dim_head,
-                                depth=transformer_depth,
-                                context_dim=context_dim,
-                                disable_self_attn=disabled_sa,
-                                use_linear=use_linear_in_transformer,
-                                use_checkpoint=use_checkpoint,
-                                attn_com=self.attn_com,
-                                use_mask=self.use_mask,
-                                show_ca=show_ca,
-                            )
-                        )
-                self.input_blocks.append(TimestepEmbedSequential(*layers))
-                self.zero_convs.append(self.make_zero_conv(ch))
-                self._feature_size += ch
-                input_block_chans.append(ch)
-            if level != len(channel_mult) - 1:
-                out_ch = ch
-                self.input_blocks.append(
-                    TimestepEmbedSequential(
-                        ResBlock(
-                            ch,
-                            time_embed_dim,
-                            dropout,
-                            out_channels=out_ch,
-                            dims=dims,
-                            use_checkpoint=use_checkpoint,
-                            use_scale_shift_norm=use_scale_shift_norm,
-                            down=True,
-                        )
-                        if resblock_updown
-                        else Downsample(
-                            ch, conv_resample, dims=dims, out_channels=out_ch
-                        )
-                    )
-                )
-                ch = out_ch
-                input_block_chans.append(ch)
-                self.zero_convs.append(self.make_zero_conv(ch))
-                ds *= 2
-                self._feature_size += ch
-
-        if num_head_channels == -1:
-            dim_head = ch // num_heads
-        else:
-            num_heads = ch // num_head_channels
-            dim_head = num_head_channels
-        if legacy:
-            # num_heads = 1
-            dim_head = ch // num_heads if use_spatial_transformer else num_head_channels
-        self.middle_block = TimestepEmbedSequential(
-            ResBlock(
-                ch,
-                time_embed_dim,
-                dropout,
-                dims=dims,
-                use_checkpoint=use_checkpoint,
-                use_scale_shift_norm=use_scale_shift_norm,
-            ),
-            (
-                AttentionBlock(
-                    ch,
-                    use_checkpoint=use_checkpoint,
-                    num_heads=num_heads,
-                    num_head_channels=dim_head,
-                    use_new_attention_order=use_new_attention_order,
-                )
-                if not use_spatial_transformer
-                else SpatialTransformer(  # always uses a self-attn
-                    ch,
-                    num_heads,
-                    dim_head,
-                    depth=transformer_depth,
-                    context_dim=context_dim,
-                    disable_self_attn=disable_middle_self_attn,
-                    use_linear=use_linear_in_transformer,
-                    use_checkpoint=use_checkpoint,
-                )
-            ),
-            ResBlock(
-                ch,
-                time_embed_dim,
-                dropout,
-                dims=dims,
-                use_checkpoint=use_checkpoint,
-                use_scale_shift_norm=use_scale_shift_norm,
-            ),
-        )
-        self.middle_block_out = self.make_zero_conv(ch)
-        self._feature_size += ch
-
-    def make_zero_conv(self, channels):
-        return TimestepEmbedSequential(
-            zero_module(conv_nd(self.dims, channels, channels, 1, padding=0))
-        )
-
+class ControlNet_masa(ControlNet):
     def forward(self, x, hint, text_info, timesteps, context, **kwargs):
         """
         context is conditioning for the model
@@ -850,7 +630,6 @@ class ControlNet_r(nn.Module):
 
         # guided_hint from text_info
         B, C, H, W = x.shape
-        mask = text_info["attn_mask"]
         glyphs = torch.cat(text_info["glyphs"], dim=1).sum(dim=1, keepdim=True)
         positions = torch.cat(text_info["positions"], dim=1).sum(dim=1, keepdim=True)
         enc_glyph = self.glyph_block(glyphs, emb, context)
@@ -882,20 +661,14 @@ class ControlNet_r(nn.Module):
             #             h =
 
             if guided_hint is not None:
-                if self.attn_com:
-                    h = module(h, emb, context, mask)
-                else:
-                    h = module(h, emb, context)
+                h = module(h, emb, context)
                 # h_f = module(h_f,emb,context)
                 h[:B // 2] += guided_hint  # Auxiliary Latent plus Latent
                 h[B // 2:] += flat_guided_hint
                 guided_hint = None
                 # h = torch.concat([h,h_f],dim=1)
             else:
-                if self.attn_com:
-                    h = module(h, emb, context, mask)
-                else:
-                    h = module(h, emb, context)
+                h = module(h, emb, context)
             outs.append(zero_conv(h, emb, context))# .chunk(2, dim=0)[0])
 
         h = self.middle_block(h, emb, context)
@@ -903,7 +676,7 @@ class ControlNet_r(nn.Module):
         # outs = torch.chunk(outs,2,dim=0)[0]
         return outs
 
-class SpatialTransformer_r(SpatialTransformer):
+class SpatialTransformer_masa(SpatialTransformer):
 
     def __init__(
         self,
@@ -926,7 +699,7 @@ class SpatialTransformer_r(SpatialTransformer):
             context_dim = [context_dim]
         self.transformer_blocks = nn.ModuleList(
             [
-                BasicTransformerBlock_r(
+                BasicTransformerBlock_masa(
                     n_heads * d_head,
                     n_heads,
                     d_head,
@@ -935,15 +708,33 @@ class SpatialTransformer_r(SpatialTransformer):
                     disable_self_attn=disable_self_attn,
                     checkpoint=use_checkpoint,
                     attn_com=self.attn_com,
-                    use_mask=use_mask,
-                    show_ca=show_ca,
                 )
                 for d in range(depth)
             ]
         )
+    def forward(self, x, context=None, mask=None, use_masa=False):
+        # note: if no context is given, cross-attention defaults to self-attention
+        if not isinstance(context, list):
+            context = [context]
+        b, c, h, w = x.shape
+        x_in = x
+        x = self.norm(x)
+        if not self.use_linear:
+            x = self.proj_in(x)
+        x = rearrange(x, "b c h w -> b (h w) c").contiguous()
+        if self.use_linear:
+            x = self.proj_in(x)
+        for i, block in enumerate(self.transformer_blocks):
+            x = block(x, context=context[i], mask=mask, use_masa=use_masa)
+        if self.use_linear:
+            x = self.proj_out(x)
+        x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w).contiguous()
+        if not self.use_linear:
+            x = self.proj_out(x)
+        return x + x_in
 
 
-class BasicTransformerBlock_r(BasicTransformerBlock):
+class BasicTransformerBlock_masa(BasicTransformerBlock):
     ATTENTION_MODES = {
         "softmax": CrossAttention,  # vanilla attention
         "softmax-xformers": MemoryEfficientCrossAttention,
@@ -960,19 +751,16 @@ class BasicTransformerBlock_r(BasicTransformerBlock):
         checkpoint=True,
         disable_self_attn=False,
         attn_com=False,
-        use_mask=False,
-        show_ca=False
     ):
         super().__init__(dim, n_heads, d_head, dropout, context_dim, gated_ff, checkpoint)
         self.attn_com = attn_com
-        self.attn1 = MemoryEfficientCrossAttention_r(
+        self.attn1 = MemoryEfficientCrossAttention_masa(
             query_dim=dim,
             heads=n_heads,
             dim_head=d_head,
             dropout=dropout,
             context_dim=context_dim if self.disable_self_attn else None,
             attn_com=self.attn_com,
-            use_mask=use_mask
         )  # is a self-attention if not self.disable_self_attn
         # self.attn2 = MemoryEfficientCrossAttention_show(
         #     query_dim=dim,
@@ -983,149 +771,79 @@ class BasicTransformerBlock_r(BasicTransformerBlock):
         #     show_ca=show_ca
         # )
 
-    def forward(self, x, context=None, mask=None):
+    def forward(self, x, context=None, mask=None,use_masa=False):
         return checkpoint(
-            self._forward, (x, context, mask,), self.parameters(), self.checkpoint
+            self._forward, (x, context, mask,use_masa), self.parameters(), self.checkpoint
         )
 
-    def _forward(self, x, context=None, mask=None):
-        x = self.attn1(self.norm1(x), context=context if self.disable_self_attn else None, mask=mask) + x
+    def _forward(self, x, context=None, mask=None, use_masa=False):
+        x = self.attn1(self.norm1(x), context=context if self.disable_self_attn else None, mask=mask,use_masa=use_masa) + x
         x = self.attn2(self.norm2(x), context=context) + x
         x = self.ff(self.norm3(x)) + x
         return x
 
 
-class MemoryEfficientCrossAttention_r(MemoryEfficientCrossAttention):
-    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0, attn_com=False,use_mask=False):
+class MemoryEfficientCrossAttention_masa(MemoryEfficientCrossAttention):
+    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0, attn_com=False,use_mask=True):
         super().__init__(query_dim, context_dim, heads, dim_head, dropout)
         self.attn_com = attn_com
         self.use_mask = use_mask
         # print("Successfully replaced original MemoryEfficientCA!")
 
-    def forward(self, x, context=None, mask=None):
+    def forward(self, x, context=None, mask=None,use_masa=False):
         # print(f"Using modified at {self.query_dim}")
-        q = self.to_q(x)
-        context = default(context, x)
-        k = self.to_k(context)
-        v = self.to_v(context)
+        if self.attn_com and use_masa:
+            q = self.to_q(x)
+            context = default(context, x)
+            k = self.to_k(context)
+            v = self.to_v(context)
 
-        b, _, _ = q.shape
-        qs = list(q.chunk(2,dim=0))
-        ks = list(k.chunk(2,dim=0))
-        vs = list(v.chunk(2,dim=0))
-        b_ori = b // 2
-        # k_ori = k_f
-        # v_ori = v_f
-        if self.attn_com:
-            ks[0] = torch.concat(ks,dim=1)
-            vs[0] = torch.concat(vs,dim=1)
-            # k_ori = k_f
-            # k_ori = v_f
-        for idx in range(len(qs)):
-            qs[idx],ks[idx],vs[idx] = map(
-                lambda t: t.unsqueeze(3)
-                .reshape(b_ori, t.shape[1], self.heads, self.dim_head)
+            b, _, _ = q.shape
+            qs = list(q.chunk(2,dim=0))
+            ks = list(k.chunk(2,dim=0))
+            vs = list(v.chunk(2,dim=0))
+            b_ori = b // 2
+            for idx in range(len(qs)):
+                qs[idx],ks[idx],vs[idx] = map(
+                    lambda t: t.unsqueeze(3)
+                    .reshape(b_ori, t.shape[1], self.heads, self.dim_head)
+                    .permute(0, 2, 1, 3)
+                    .reshape(b_ori * self.heads, t.shape[1], self.dim_head)
+                    .contiguous(),
+                    (qs[idx], ks[idx], vs[idx]),
+                )
+
+            if exists(mask):
+                # TODO: Rewrite Timesequntial for mask convey
+                mask = [F.interpolate(m, size=(q.shape[1], k.shape[1]), mode="nearest") for m in mask] # batch_size/2, 1, q_len, k_len
+                mask = [m.repeat(1,self.heads,1,1) for m in mask]
+                mask = [m.reshape(b_ori * self.heads, q.shape[1], k.shape[1]) for m in mask]
+                # mask = torch.log(mask)
+                # inv_mask = torch.log(inv_mask)
+                # print(mask.max())
+                # print(mask.shape) batch_size * heads, q_len, k_len
+            else:
+                mask = [torch.ones([b_ori * self.heads, q.shape[1], k.shape[1]])] * 2
+
+            # actually compute the attention, what we cannot get enough of
+            out = xformers.ops.memory_efficient_attention(qs[0], ks[1], vs[1], attn_bias=None, op=self.attention_op)
+            b_out = xformers.ops.memory_efficient_attention(qs[0], ks[1], vs[1], attn_bias=None, op=self.attention_op,)
+            out = [out + b_out]
+            out += [
+                xformers.ops.memory_efficient_attention(qs[1], ks[1], vs[1], attn_bias=None, op=self.attention_op,)
+            ]
+            out = torch.cat(out,dim=0)
+
+            out = (
+                out.unsqueeze(0)
+                .reshape(b, self.heads, out.shape[1], self.dim_head)
                 .permute(0, 2, 1, 3)
-                .reshape(b_ori * self.heads, t.shape[1], self.dim_head)
-                .contiguous(),
-                (qs[idx], ks[idx], vs[idx]),
+                .reshape(b, out.shape[1], self.heads * self.dim_head)
             )
-
-        if exists(mask) and self.attn_com and self.use_mask:
-            # TODO: Rewrite Timesequntial for mask convey
-            mask = F.dropout(mask, p=0.5)
-            mask = torch.concat([torch.ones_like(mask),mask],dim=-1)
-            mask = F.interpolate(mask, size=(qs[0].shape[1], ks[0].shape[1]), mode="nearest") # batch_size/2, 1, q_len, k_len
-            mask = mask.repeat(1,self.heads,1,1)
-            mask = mask.reshape(b_ori * self.heads, qs[0].shape[1], ks[0].shape[1])
-            mask = torch.log(mask)
-            # print(mask.max())
-            # print(mask.shape) batch_size * heads, q_len, k_len
+            return self.to_out(out)
         else:
-            mask = None
-
-        # actually compute the attention, what we cannot get enough of
-        out = [xformers.ops.memory_efficient_attention(qs[0], ks[0], vs[0], attn_bias=mask, op=self.attention_op)]
-        out += [
-            xformers.ops.memory_efficient_attention(
-                torch.cat(qs[1:], dim=0),
-                torch.cat(ks[1:], dim=0),
-                torch.cat(vs[1:], dim=0),
-                attn_bias=None,
-                op=self.attention_op,
+            return super().forward(
+                x,
+                context,
+                mask=None
             )
-        ]
-
-        out = torch.concat(out,dim=0)
-
-        out = (
-            out.unsqueeze(0)
-            .reshape(b, self.heads, out.shape[1], self.dim_head)
-            .permute(0, 2, 1, 3)
-            .reshape(b, out.shape[1], self.heads * self.dim_head)
-        )
-        return self.to_out(out)
-
-
-class MemoryEfficientCrossAttention_show(MemoryEfficientCrossAttention):
-    def __init__(
-        self,
-        query_dim,
-        context_dim=None,
-        heads=8,
-        dim_head=64,
-        dropout=0,
-        attn_com=False,
-        use_mask=False,
-        show_ca=False,
-    ):
-        super().__init__(query_dim, context_dim, heads, dim_head, dropout)
-        self.attn_com = attn_com
-        self.use_mask = use_mask
-        self.show_ca = show_ca
-        # print("Successfully replaced original MemoryEfficientCA!")
-
-    def forward(
-        self,
-        x,
-        context=None,
-        mask=None,
-        attn_ctrl=None,
-    ):
-        # print(f"Using modified at {self.query_dim}")
-        q = self.to_q(x)
-        context = default(context, x)
-        k = self.to_k(context)
-        v = self.to_v(context)
-
-        b, _, _ = q.shape
-        q, k, v = map(
-            lambda t: t.unsqueeze(3)
-            .reshape(b, t.shape[1], self.heads, self.dim_head)
-            .permute(0, 2, 1, 3)
-            .reshape(b * self.heads, t.shape[1], self.dim_head)
-            .contiguous(),
-            (q, k, v),
-        )
-        # actually compute the attention, what we cannot get enough of
-        if self.show_ca and attn_ctrl is not None:
-            attn_for_show = q @ k.transpose(1, 2)
-            attn_for_show = attn_for_show.reshape(b, self.heads, attn_for_show.shape[1], attn_for_show.shape[2]).sum(dim=1, keepdim=True).squeeze()
-            # attn_for_show = (attn_for_show[0]-attn_for_show[0].min())/(attn_for_show[0].max()-attn_for_show[0].min())
-            # print(attn_ctrl)
-            attn_ctrl(attn_for_show, place_in_unet=int(attn_for_show.shape[1]**0.5))
-
-        # show_ca(attn_for_show)
-        out = xformers.ops.memory_efficient_attention(
-            q, k, v, attn_bias=None, op=self.attention_op
-        )
-
-        if exists(mask):
-            raise NotImplementedError
-        out = (
-            out.unsqueeze(0)
-            .reshape(b, self.heads, out.shape[1], self.dim_head)
-            .permute(0, 2, 1, 3)
-            .reshape(b, out.shape[1], self.heads * self.dim_head)
-        )
-        return self.to_out(out)

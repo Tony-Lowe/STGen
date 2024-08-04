@@ -20,10 +20,12 @@ from gradio.components import Component
 from pytorch_lightning import seed_everything
 import einops
 import time
+from PIL import Image
 
 
+from cldm.cldm_masa import myDDIMSampler
 from util import check_channels, resize_image, save_images, arr2tensor
-from t3_dataset import draw_glyph, draw_glyph2,draw_glyph3, get_caption_pos
+from t3_dataset import draw_glyph, draw_glyph2, draw_glyph3, draw_glyph4, get_caption_pos
 
 BBOX_MAX_NUM = 8
 PLACE_HOLDER = "*"
@@ -75,12 +77,12 @@ def parse_args():
     parser.add_argument(
         "--config_yaml",
         type=str,
-        default="./models_yaml/anytext_sd15.yaml",
+        default="./models_yaml/anytext_sd15_masa.yaml",
     )
     parser.add_argument(
         "--save_path",
         type=str,
-        default="SaveImages",
+        default="Results/masa",
         help="load a specified anytext checkpoint",
     )
     args = parser.parse_args()
@@ -106,7 +108,7 @@ if load_model:
     model = create_model(args.config_yaml).cuda()
     # print(model.cond_stage_model.transformer.text_model.embeddings)
     model.load_state_dict(load_state_dict(args.model_path, location="cuda"),strict=True)
-    ddim_sampler = DDIMSampler(model)
+    ddim_sampler = myDDIMSampler(model)
     # print(model.control_model.input_blocks.state_dict().keys())
     # print(model.control_model.input_blocks[5][1].transformer_blocks[0])
 
@@ -281,32 +283,51 @@ def inference(input_data, **params):
     info["texts"] =  texts
     # print(prompt)
     # print(texts)
+    positions = []
+    flat_positions = []
     for idx, text in enumerate(texts):
         gly_line = draw_glyph(font, text)
         # cv2.imshow("glyph_line", gly_line)
         # cv2.waitKey(0)
         glyphs, angle, center = draw_glyph3(font, text, polygons[idx], scale=2)
-        flat_glyph, _, _ = draw_glyph3(font,text,polygons[idx],scale=2,offset_angle=-angle)
-        Mat_r = cv2.getRotationMatrix2D(center,-angle,scale=1)
+        flat_glyph, _, _ = draw_glyph3(
+            font, text, polygons[idx], scale=2,offset_angle=-angle
+        )
+
+        # Flat_latent
+        # flat_glyph, new_poly = draw_glyph4(font, text, polygons[idx], scale=2, offset_angle=-angle)
+
+        # flat_positions += [draw_pos(new_poly), 1.0]
+
+        Mat_r = cv2.getRotationMatrix2D(center, -angle, scale=1)
         info["Mats_r"] += [Mat_r]
         # cv2.imshow('glyphs', glyphs)
+        # cv2.imshow('flat glyphs', flat_glyph)
         # cv2.waitKey(0)
         info["angles"] += [-angle]
         info["gly_line"] += [arr2tensor(gly_line, params["image_count"])]
         info["glyphs"] += [arr2tensor(glyphs, params["image_count"])]   
-        info["flat_glyphs"] += [arr2tensor(flat_glyph,params["image_count"])]
-        info["glyphs"] = info["flat_glyphs"]
+        info["flat_glyphs"] += [arr2tensor(flat_glyph, params["image_count"])]
     # cv2.destroyAllWindows()
-    positions = []
-    flat_positions = []
     for idx, poly in enumerate(polygons):
         positions += [draw_pos(poly, 1.0)]
-        flat_positions += [np.expand_dims(np.array(cv2.warpAffine(positions[idx],info["Mats_r"][idx],dsize=positions[idx].shape[:2])),2)]
+        img = Image.fromarray(
+            np.squeeze(positions[idx] * 255, axis=2).astype(np.uint8)
+        )
+        # img.show(f"Position{idx}.png")
+        # print(idx)
+        # print(polygons[idx])
+        # print(positions[idx])
+        # print(info["Mats_r"][idx])
+        flat_positions += [np.expand_dims(np.array(cv2.warpAffine(positions[idx], info["Mats_r"][idx], dsize=positions[idx].shape[:2])), 2)]
+        # flat_img = Image.fromarray(
+        #     np.squeeze(flat_positions[idx] * 255, axis=2).astype(np.uint8)
+        # )
+        # flat_img.show("Flat_pos")
         info["positions"] += [arr2tensor(positions[idx], params["image_count"])] # shape [batch_size ,1 , 512, 512]
         info["flat_positions"] += [arr2tensor(flat_positions[idx], params["image_count"])]
     # print(info["positions"][0].shape)
     # padding
-    info["flat_positions"]
     n_lines = min(len(texts), max_lines)
     info["n_lines"] = n_lines
     n_pad = max_lines - n_lines
@@ -346,18 +367,28 @@ def inference(input_data, **params):
 
     hint = arr2tensor(hint, params["image_count"])
     flat_hint = arr2tensor(flat_hint, params["image_count"])
-    info["attn_mask"] = torch.concat([torch.ones_like(flat_hint),flat_hint],dim=-1)
+    info["attn_mask"] = [
+        torch.cat([i.unsqueeze(0) for i in info["flat_positions"]], dim=0)
+        .sum(dim=0, keepdim=True)
+        .squeeze(0),
+        torch.cat([i.unsqueeze(0) for i in info["positions"]], dim=0)
+        .sum(dim=0, keepdim=True)
+        .squeeze(0),
+    ]
+    # info["attn_ctrl"] = AttentionStore()
+
+    batch_size = params["image_count"] * 2
     cond = model.get_learned_conditioning(
         dict(
             c_concat=[hint],
-            c_crossattn=[[prompt + "," + params["a_prompt"]] * params["image_count"]],
+            c_crossattn=[[prompt + "," + params["a_prompt"]] * batch_size],
             text_info=info,
         )
     )
     un_cond = model.get_learned_conditioning(
         dict(
             c_concat=[hint],
-            c_crossattn=[[params["n_prompt"]] * params["image_count"]],
+            c_crossattn=[[params["n_prompt"]] * batch_size],
             text_info=info,
         )
     )
@@ -368,7 +399,7 @@ def inference(input_data, **params):
     tic = time.time()
     samples, intermediates = ddim_sampler.sample(
         params["ddim_steps"],
-        params["image_count"],
+        batch_size,
         shape,
         cond,
         log_every_t=1,
@@ -378,25 +409,24 @@ def inference(input_data, **params):
         unconditional_conditioning=un_cond,
     )
 
-    for idx, x_inter in enumerate(intermediates["x_inter"]):
-        # print(idx)
-        x_inter = model.decode_first_stage(x_inter)
-        x_inter = (
-        (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5)
-        .cpu()
-        .numpy()
-        .clip(0, 255)
-        .astype(np.uint8)
-        )
-        if not os.path.exists(os.path.join(img_save_folder,"inter")):
-            os.makedirs(os.path.join(img_save_folder, "inter"))
-        cv2.imwrite(os.path.join(img_save_folder, "inter",f"{idx}.png"), x_inter[0])
+    # for idx, x_inter in enumerate(intermediates["x_inter"]):
+    #     # print(idx)
+    #     x_inter = model.decode_first_stage(x_inter)
+    #     x_inter = (
+    #     (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5)
+    #     .cpu()
+    #     .numpy()
+    #     .clip(0, 255)
+    #     .astype(np.uint8)
+    #     )
+    #     if not os.path.exists(os.path.join(img_save_folder,"inter")):
+    #         os.makedirs(os.path.join(img_save_folder, "inter"))
+    #     cv2.imwrite(os.path.join(img_save_folder, "inter",f"{idx}.png"), x_inter[0])
 
     cost = (time.time() - tic) * 1000.0
     if save_memory:
         model.low_vram_shift(is_diffusing=False)
     x_samples = model.decode_first_stage(samples)
-    # print(x_samples.shape) # 4, 3 512, 512
     x_samples = (
         (einops.rearrange(x_samples, "b c h w -> b h w c") * 127.5 + 127.5)
         .cpu()
@@ -404,7 +434,9 @@ def inference(input_data, **params):
         .clip(0, 255)
         .astype(np.uint8)
     )
-    results = [x_samples[i] for i in range(params["image_count"])]
+    # print(x_samples.shape)
+    results = [x_samples[i] for i in range(batch_size)]
+    # results = x_samples
     results += [cost]
     return results
 

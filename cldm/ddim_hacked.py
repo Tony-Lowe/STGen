@@ -188,16 +188,10 @@ class DDIMSampler(object):
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
             model_output = self.model.apply_model(x, t, c)
         else:
-            model_t = self.model.apply_model(x, t, c)
             model_uncond = self.model.apply_model(x, t, unconditional_conditioning)
+            model_t = self.model.apply_model(x, t, c)
             model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
 
-        # # %-----------------------%
-        # # 记得删掉！！！！！！
-        # x = torch.concat((x,x))
-        # b = b*2
-        # # 记得删掉！！！！！！
-        # # %-----------------------%
 
         if self.model.parameterization == "v": # Using  default eps in anytext
             e_t = self.model.predict_eps_from_z_and_v(x, t, model_output)

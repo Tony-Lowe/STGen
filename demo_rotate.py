@@ -23,7 +23,9 @@ import time
 from PIL import Image
 
 
+from cldm.cldm_r import myDDIMSampler
 from util import check_channels, resize_image, save_images, arr2tensor
+from cldm.ctrl import AttentionStore
 from t3_dataset import draw_glyph, draw_glyph2,draw_glyph3, draw_glyph4, get_caption_pos
 
 BBOX_MAX_NUM = 8
@@ -292,17 +294,13 @@ def inference(input_data, **params):
         flat_glyph, _, _ = draw_glyph3(
             font, text, polygons[idx], scale=2,offset_angle=-angle
         )
+
+        # Flat_latent
         # flat_glyph, new_poly = draw_glyph4(font, text, polygons[idx], scale=2, offset_angle=-angle)
 
         # flat_positions += [draw_pos(new_poly), 1.0]
 
         Mat_r = cv2.getRotationMatrix2D(center, -angle, scale=1)
-        # Mat_r = np.concatenate((np.array(Mat_r),np.array([[0,0,1]])),axis=0)
-        # Mat_t = np.array([[1, 0, W//2 - center[0]],
-        #                   [0, 1, H//2 - center[1]],
-        #                   [0, 0, 1]])
-        # Mat_r = np.matmul(Mat_r, Mat_t)[:2]
-        # print(Mat_r)
         info["Mats_r"] += [Mat_r]
         # cv2.imshow('glyphs', glyphs)
         # cv2.imshow('flat glyphs', flat_glyph)
@@ -314,10 +312,10 @@ def inference(input_data, **params):
     # cv2.destroyAllWindows()
     for idx, poly in enumerate(polygons):
         positions += [draw_pos(poly, 1.0)]
-        # img = Image.fromarray(
-        #     np.squeeze(positions[idx] * 255, axis=2).astype(np.uint8)
-        # )
-        # img.save(f"Position{idx}.png")
+        img = Image.fromarray(
+            np.squeeze(positions[idx] * 255, axis=2).astype(np.uint8)
+        )
+        img.save(f"Position{idx}.png")
         # print(idx)
         # print(polygons[idx])
         # print(positions[idx])
@@ -370,7 +368,9 @@ def inference(input_data, **params):
 
     hint = arr2tensor(hint, params["image_count"])
     flat_hint = arr2tensor(flat_hint, params["image_count"])
-    info["attn_mask"] = torch.concat([torch.ones_like(flat_hint),flat_hint],dim=-1)
+    info["attn_mask"] = torch.cat([i.unsqueeze(0) for i in info["flat_positions"]],dim=0).sum(dim=0,keepdim=True).squeeze(0)
+    print("attn_mask",info["attn_mask"].shape)
+    # info["attn_ctrl"] = AttentionStore()
 
     batch_size = params["image_count"] * 2
     cond = model.get_learned_conditioning(
