@@ -5,6 +5,7 @@ Code: https://github.com/tyxsspa/AnyText
 Copyright (c) Alibaba, Inc. and its affiliates.
 """
 
+import datetime
 import os
 import torch
 from modelscope.pipelines import pipeline
@@ -22,8 +23,6 @@ import einops
 import time
 from PIL import Image
 
-
-from cldm.cldm_masa import myDDIMSampler
 from util import check_channels, resize_image, save_images, arr2tensor
 from t3_dataset import draw_glyph, draw_glyph2, draw_glyph3, draw_glyph4, get_caption_pos
 
@@ -82,7 +81,7 @@ def parse_args():
     parser.add_argument(
         "--save_path",
         type=str,
-        default="Results/masa",
+        default="Result/masa",
         help="load a specified anytext checkpoint",
     )
     args = parser.parse_args()
@@ -104,11 +103,11 @@ if load_model:
     # inference = pipeline("my-anytext-task", **infer_params)
     from cldm.model import create_model, load_state_dict
     from cldm.ddim_hacked import DDIMSampler
+    from cldm_mod.ddim_ctc import myDDIMSampler
 
     model = create_model(args.config_yaml).cuda()
     # print(model.cond_stage_model.transformer.text_model.embeddings)
     model.load_state_dict(load_state_dict(args.model_path, location="cuda"),strict=True)
-    ddim_sampler = myDDIMSampler(model)
     # print(model.control_model.input_blocks.state_dict().keys())
     # print(model.control_model.input_blocks[5][1].transformer_blocks[0])
 
@@ -255,6 +254,10 @@ def draw_pos(ploygon, prob=1.0):
     return img / 255.
 
 def inference(input_data, **params):
+    ddim_sampler = myDDIMSampler(
+        model,start_step=params["start_op_step"],end_step=params["end_op_step"], max_op_step=params["OPTIMIZE_STEPS"],loss_alpha=params["alpha"],loss_beta=params["beta"]
+    )
+
     (
         H,
         W,
@@ -278,62 +281,32 @@ def inference(input_data, **params):
     info["flat_glyphs"] = []
     info["flat_positions"] = []
     info["Mats_r"] = []
+    info["lambda"]=params["lambda"]
+    info["step_size"]=params["step_size"]
     # info["font"] = font
     texts, prompt = get_lines(prompt)
     info["texts"] =  texts
-    # print(prompt)
-    # print(texts)
     positions = []
     flat_positions = []
     for idx, text in enumerate(texts):
         gly_line = draw_glyph(font, text)
-        # cv2.imshow("glyph_line", gly_line)
-        # cv2.waitKey(0)
         glyphs, angle, center = draw_glyph3(font, text, polygons[idx], scale=2)
         flat_glyph, _, _ = draw_glyph3(
             font, text, polygons[idx], scale=2,offset_angle=-angle
         )
-
-        # Flat_latent
-        # flat_glyph, new_poly = draw_glyph4(font, text, polygons[idx], scale=2, offset_angle=-angle)
-
-        # flat_positions += [draw_pos(new_poly), 1.0]
-
         Mat_r = cv2.getRotationMatrix2D(center, -angle, scale=1)
         info["Mats_r"] += [Mat_r]
-        # cv2.imshow('glyphs', glyphs)
-        # cv2.imshow('flat glyphs', flat_glyph)
-        # cv2.waitKey(0)
         info["angles"] += [-angle]
         info["gly_line"] += [arr2tensor(gly_line, params["image_count"])]
         info["glyphs"] += [arr2tensor(glyphs, params["image_count"])]   
         info["flat_glyphs"] += [arr2tensor(flat_glyph, params["image_count"])]
-    # cv2.destroyAllWindows()
     for idx, poly in enumerate(polygons):
         positions += [draw_pos(poly, 1.0)]
-        img = Image.fromarray(
-            np.squeeze(positions[idx] * 255, axis=2).astype(np.uint8)
-        )
-        # img.show(f"Position{idx}.png")
-        # print(idx)
-        # print(polygons[idx])
-        # print(positions[idx])
-        # print(info["Mats_r"][idx])
         flat_positions += [np.expand_dims(np.array(cv2.warpAffine(positions[idx], info["Mats_r"][idx], dsize=positions[idx].shape[:2])), 2)]
-        # flat_img = Image.fromarray(
-        #     np.squeeze(flat_positions[idx] * 255, axis=2).astype(np.uint8)
-        # )
-        # flat_img.show("Flat_pos")
+        info["flat_positions"] += [arr2tensor(flat_positions[idx], params["image_count"])] # nline * [batch_size * 1 * 512 * 512]
         info["positions"] += [arr2tensor(positions[idx], params["image_count"])] # shape [batch_size ,1 , 512, 512]
-        info["flat_positions"] += [arr2tensor(flat_positions[idx], params["image_count"])]
-    # print(info["positions"][0].shape)
     # padding
     n_lines = min(len(texts), max_lines)
-    info["n_lines"] = n_lines
-    n_pad = max_lines - n_lines
-    if n_pad > 0:
-        positions += [np.zeros((512, 512, 1))] * n_pad
-        flat_positions += [np.zeros((512, 512, 1))] * n_pad
 
     info["n_lines"] = [n_lines] * params["image_count"]
     # get masked_x
@@ -348,7 +321,6 @@ def inference(input_data, **params):
     info["masked_x"] = torch.cat(
         [masked_x for _ in range(params["image_count"])], dim=0
     )
-    # print(info["masked_x"].shape)
 
     flat_hint = np.sum(flat_positions, axis=0).clip(0, 1)
     # print(hint.shape)
@@ -397,7 +369,7 @@ def inference(input_data, **params):
         model.low_vram_shift(is_diffusing=True)
     model.control_scales = [params["strength"]] * 13
     tic = time.time()
-    samples, intermediates = ddim_sampler.sample(
+    samples, sampels_other, intermediates = ddim_sampler.sample(
         params["ddim_steps"],
         batch_size,
         shape,
@@ -435,7 +407,29 @@ def inference(input_data, **params):
         .astype(np.uint8)
     )
     # print(x_samples.shape)
+    now = datetime.datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H_%M_%S")
+    for idx, x_inter in enumerate(intermediates["x_inter"]):
+        # print(idx)
+        # x_inter = model.decode_first_stage(x_inter)
+        # x_inter = (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
+        decode_x0 = model.decode_first_stage(intermediates["pred_x0_other"][idx])
+        decode_x0 = torch.clamp(decode_x0, -1, 1)
+        decode_x0 = (decode_x0 + 1.0) / 2.0 * 255  # -1,1 -> 0,255; n, c,h,w
+        decode_x0 = einops.rearrange(decode_x0, "b c h w -> b h w c").cpu().numpy().clip(0, 255).astype(np.uint8)
+        # if not os.path.exists(os.path.join(img_save_folder,"inter")):
+        #     os.makedirs(os.path.join(img_save_folder, "inter"))
+        # cv2.imwrite(os.path.join(img_save_folder, "inter",f"{idx}.png"), x_inter[0])
+        save_with_para = os.path.join(img_save_folder,f"""{params["step_size"]}_alpha_{params["alpha"]}_beta_{params["beta"]}_{int(params["start_op_step"])}->{int(params["end_op_step"])}_{int(params["OPTIMIZE_STEPS"])}""",date_str)
+        if not os.path.exists(os.path.join(save_with_para, "inter_other")):
+            os.makedirs(os.path.join(save_with_para, "inter_other"))
+        cv2.imwrite(os.path.join(save_with_para, "inter_other",f"{time_str}_{idx}.png"), decode_x0[0])
+
     results = [x_samples[i] for i in range(batch_size)]
+    x_samples_other = model.decode_first_stage(sampels_other)
+    x_samples_other = ((einops.rearrange(x_samples_other, "b c h w -> b h w c") * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8))
+    # results += [x_samples_other[i] for i in range(batch_size)]
     # results = x_samples
     results += [cost]
     return results
@@ -466,9 +460,17 @@ def process(
     n_prompt,
     times,
     times1,
+    step_size,
+    lamb,
+    op_steps,
+    start_op_step,
+    end_op_step,
+    loss_alpha,
+    loss_beta,
     *rect_list,
     angle=0,
 ):
+    torch.cuda.empty_cache()
     n_lines = count_lines(prompt)
     # Text Generation
     if mode == "gen":
@@ -544,6 +546,13 @@ def process(
         "lora_path_ratio": lora_path_ratio,
         "times":times,
         "times1":times1,
+        "step_size":step_size,
+        "lambda":lamb,
+        "start_op_step":int(start_op_step),
+        "end_op_step":int(end_op_step),
+        "OPTIMIZE_STEPS":int(op_steps),
+        "alpha":loss_alpha,
+        "beta":loss_beta,
     }
     input_data = {
         "prompt": prompt,
@@ -555,8 +564,9 @@ def process(
     results = inference(input_data, **params)
     time = results.pop()
     # if rtn_code >= 0:
-    save_images(results, img_save_folder)
-    print(f"Done, result images are saved in: {img_save_folder}")
+    save_with_para = os.path.join(img_save_folder,f"{step_size}_alpha_{loss_alpha}_beta_{loss_beta}_{int(start_op_step)}->{int(end_op_step)}_{int(op_steps)}")
+    save_images(results, save_with_para)
+    print(f"Done, result images are saved in: {save_with_para}")
     #     if rtn_warning:
     #         gr.Warning(rtn_warning)
     # else:
@@ -722,7 +732,7 @@ with block:
                         label="Image Count(图片数)",
                         minimum=1,
                         maximum=12,
-                        value=4,
+                        value=1,
                         step=1,
                     )
                     ddim_steps = gr.Slider(
@@ -788,6 +798,19 @@ with block:
                 )
                 base_model_path = gr.Textbox(label="Base Model Path(基模地址)")
                 lora_path_ratio = gr.Textbox(label="LoRA Path and Ratio(lora地址和比例)")
+
+            with gr.Accordion("🛠Optimization Parameters(优化参数)", open=False):
+                with gr.Row(variant="compact"):
+                    step_size = gr.Number(label="Step Size(优化步长)", value=0.1)
+                    lamd = gr.Number(label="Lambda(loss系数)",value=1)
+                    op_step = gr.Number(label="Optimize Steps(优化步数)", value=20)
+                with gr.Row(variant="compact"):
+                    start_op_step = gr.Number(label="Start Optimize Step(结束优化的inference步数)", value=0)
+                    end_op_step = gr.Number(label="End Optimize Step(结束优化的inference步数)", value=10)
+                with gr.Row(variant="compact"):
+                    loss_alpha = gr.Number(label="Alpha(Ocr Loss系数)", value=0)
+                    loss_beta = gr.Number(label="Beta(MSE Loss 系数)", value=100)
+
             prompt = gr.Textbox(label="Prompt(提示词)")
             with gr.Tabs() as tab_modes:
                 with gr.Tab(
@@ -973,7 +996,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     33789703,
                                 ],
                                 [
@@ -982,7 +1005,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     35621187,
                                 ],
                                 [
@@ -991,7 +1014,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     2563689,
                                 ],
                                 [
@@ -1000,7 +1023,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     88952132,
                                 ],
                                 [
@@ -1009,7 +1032,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     66273235,
                                 ],
                                 [
@@ -1018,7 +1041,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     35107824,
                                 ],
                                 [
@@ -1027,7 +1050,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     True,
-                                    4,
+                                    1,
                                     13246309,
                                 ],
                                 [
@@ -1036,7 +1059,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     93424638,
                                 ],
                                 [
@@ -1045,7 +1068,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     83866922,
                                 ],
                                 [
@@ -1054,7 +1077,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     True,
-                                    4,
+                                    1,
                                     64901362,
                                 ],
                             ],
@@ -1347,6 +1370,13 @@ with block:
         n_prompt,
         Clip_times,
         Clip_times1,
+        step_size,
+        lamd,
+        op_step,
+        start_op_step,
+        end_op_step,
+        loss_alpha,
+        loss_beta,
         *(rect_cb_list + rect_xywh_list),
     ]
     run_gen.click(
