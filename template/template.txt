@@ -1,0 +1,228 @@
+You are a master of geometry who excels at separating concave shapes into convex shapes. Your task is described as follows:
+
+Use precise spatial imagination to analyze the shape. Split the shape into convex shapes and start numbering from 0, the vertices are in counterclockwise order in default. The split should strictly follow the method below:
+a. Determine if the shape is concave who has angles greater than 180 which needs to be divided into multible convex regions.(It should be noted that a single convex shape should not be split into different regions):
+• If so, find the inward bending points whose corresponding angle is greater than 180. 
+b. For each inward bending points, find non-adjacent point to connect diagonals that can divide the concave shape into simpler convex regions. 
+• Each point should only connect to one diagonal.
+• When connecting diagonals, choose the non-adjacent point closest in Euclidean distance to each inward bending point (the point with the smallest difference in x and y coordinates).  
+• Each convex region formed should contain at least 4 vertices.
+For each convex shapes segmented in the previous step, use lingusic imagination to divide texts and distribute them into convex shapes. The division should follow the following rules:
+a. Comparing Regions' size to determine whether the length of texts in each region:
+• If the region is relatively longer than other region, we can assign more texts.
+b. Split texts according to words, syllables or letters depending on Regions's size.
+Output the coordiantes of the convex shapes in counterclockwise order along with the assigned texts. 
+The output should strictly follow the format of the examples below:
+
+Examples:
+Vertices: [[36, 105],[54, 155],[476, 149],[491, 100]]
+Angles: [70.83, 108.98, 107.84, 72.35]
+Texts: "Deep learning"
+Step 1: Analyze the Shape and Split into Convex Shapes
+The shape is convex due to no obvious bend, since No angle is greater than 180. 
+This gives us the following 1 convex region:
+Convex Region 0
+• Vertices: [[491, 100],[36, 105],[54, 155],[476, 149]]
+Step 2: Distribute the Word "snowman" Across the Convex Shapes
+Since we have 1 regions, we can assign "Deep learning" to Convex Region 0:
+• Convex Region 0 will hold "Deep Learning".
+Final Result:
+```json
+{
+    "segmentation":[
+        {
+            "Vertices": [[491, 100],[36, 105],[54, 155],[476, 149]],
+            "Text": "Deep Learning"
+        },
+    ],
+    "diagonals": []
+}
+```
+
+Vertices: [[51, 242], [115, 283], [258, 177], [386, 277], [434, 218], [257, 67], [72, 193]]
+Angles: [99.45, 110.81, 254.55, 91.13, 91.34, 105.27, 147.46]
+Texts: "Deep learning"
+Step 1: Analyze the Shape and Split into Convex Shapes
+Vertices: [[51, 242], [115, 283], [258, 177], [386, 277], [434, 218], [257, 67], [72, 193]]
+Angles: [99.45, 110.81, 254.55, 91.13, 91.34, 105.27, 147.46]
+
+Observations:
+- Most angles are less than 180 degrees indicating convex corners.
+- A significant angle at Vertex [258, 177] is 254.55 degrees, which is greater than 180 degrees, showing a concave bend.
+Based on this information, we'll target Vertex [258, 177] for splitting the shape to form proper convex polygons. We'll introduce a diagonal to divide the shape in a way that no convex region has less than 4 vertices.
+Choice of Diagonal: Connect Vertex [258, 177] with another suitable vertex to partition the shape effectively. The chosen point should minimize crossing of edges and satisfy convexity. Most suitable point is Vertex [257, 67] for it's not adjacent to [258, 177] and separate the shape balancedly.
+Visualize Divisions:
+1. Connect [258, 177] with [257, 67].
+This potential split aims to create two convex shapes:
+- Shape 1: Vertex sequence: [[51, 242], [115, 283], [258, 177], [257, 67], [72, 193]]
+- Shape 2: Vertex sequence: [[258, 177], [386, 277], [434, 218], [257, 67]]
+
+We now evaluate this new division:
+- Verify each newly formed region is convex. This may require calculating angles of newly formed polygons.
+- Ensure there are more than three vertices in each segment to meet the problem's criteria for convex regions.
+
+Step 2: Distribute the Text "Deep Learning" Across the Convex Shapes
+Given two regions, we need to distribute the text between them. Since both regions are significant, but their sizes might differ slightly:
+Length Estimation (Heuristic):
+- Roughly estimate by counting vertices or using spatial distance among vertices.
+- Assign more text to the larger region.
+Distribute Text:
+- Divide "Deep Learning" into roughly appropriate segments based on estimated region sizes. The 2 region seems to be about the same size. "Deep Lea" for one and "rning" for another, considering readability and size constraints.
+Final Output
+```json
+{
+    "segmentation": [
+        {
+            "Vertices": [[51, 242], [115, 283], [258, 177], [257, 67], [72, 193]],
+            "Text": "Deep Le"
+        },
+        {
+            "Vertices": [[258, 177], [386, 277], [434, 218], [257, 67]],
+            "Text": "arning"
+        }
+    ],
+    "diagonals": [
+        [[258, 177], [257, 67]],
+    ]
+}
+```
+
+Vertices: [[0, 180], [65, 244], [182, 101], [286, 82], [419, 228], [496, 188], [449, 74], [353, 0], [136, 12]]
+Angles: [95.56, 84.73, 220.36, 238.02, 104.88, 95.05, 150.03, 139.21, 132.16]
+Texts: "Snowman"
+Step 1: Analyze the Shape and Split into Convex Shapes
+The shape is concave due to the inward bend at [182, 101] and [286, 82] for their corresponding angle is 220.36 and 238.02 which are both greater than 180, so we need to identify where to split it to form convex polygons. So we use diagonals between non-adjacent points to divide the concave shape into simpler convex regions.
+We will use these splitting points based on the coordinates:
+1. Split on point [182, 101] to handle the concave inward bend near points [286, 82] and [136, 12].
+2. Another split on point [286, 82] will ensure proper convex division.
+Visualize Splits:
+• Connect [182,101] and [136,12].
+• Connect [286,82] and [353,0].
+This gives us the following three convex regions:
+Convex Region 0 (Left Region)
+• Vertices: [[0, 180], [65, 244], [182, 101], [136, 12]]
+Convex Region 1 (Upper Middle Region)
+• Vertices: [[182, 101], [286, 82], [353, 0], [136, 12]]
+Convex Region 2 (Right Region)
+• Vertices: [[286, 82], [419, 228], [496, 188], [449, 74], [353, 0]]
+Step 2: Distribute the Word "snowman" Across the Convex Shapes
+Since we have 3 regions, with the Convex Region 0 and 2 are comparatively longer than Convex Region 1, we can split the texts "snowman" into "sno", "w","man" according to syllables for balanced allocation:
+• Convex Region 0 will hold "sno".
+• Convex Region 1 will hold "w".
+• Convex Region 2 will hold "man".
+Final Result: 
+```json
+{
+    "segmentation":[
+        {
+            "Vertices": [[0, 180], [65, 244], [182, 101], [136, 12]],
+            "Text": "sno"
+        },
+        {
+            "Vertices": [[182, 101], [286, 82], [353, 0], [136, 12]],
+            "Text": "w"
+        },
+        {
+            "Vertices": [[286, 82], [419, 228], [496, 188], [449, 74], [353, 0]],
+            "Text": "man"
+        }
+    ],
+    "diagonals": [
+        [[182,101], [136,12]],
+        [[286,82],[353,0]]
+    ]
+}
+```
+
+Vertices: [[1, 322],[110, 474],[293, 511],[476, 420],[511, 265],[449, 271],[372, 380],[235, 423],[69, 271]]
+Angles: [91.23, 137.07, 142.13, 129.16, 71.75, 130.77, 217.34, 239.9, 100.65]
+Texts: "Nankai University"
+Step 1: Analyze the Shape and Split into Convex Shapes
+The shape is concave due to the inward bend at multiple points, notably around [372, 380] and [235, 423] for their corresponding angeles are 217.34 and 239.9 which is greater than 180. To create convex polygons, we'll need to introduce diagonals to divide the concave shape into convex regions.
+Identifying the concave points and applying the diagonals:
+1. We can split on point [372, 380] to handle the inward bends.
+2. Another split between [235, 423] handles the inward bends and ensures proper convex division.
+Visualize Splits:
+• Connect [110,474] and [235,423]
+• Connect [476, 420] and [372,380]
+This gives us the following three convex regions:
+Convex Region 0 (Top Left Region)
+• Vertices: [[69, 271], [1, 322], [110, 474], [235, 423]]
+Convex Region 1 (Middle Region)
+• Vertices: [[110, 474], [293, 511], [476, 420], [372, 380], [235, 423]]
+Convex Region 2 (Right Region)
+• Vertices: [[511, 265], [449, 271], [372, 380], [476, 420]]
+Step 2: Distribute the Word "Nankai University" Across the Convex Shapes
+Since we have 3 regions, the Convex Region 0 and 2 are comparatively shorter than Convex Region 1. Meanwhile Region 0 is longer than Region 2. We can split the texts  "Nankai University" into "Nankai", "Univer","sity" according to syllables for balanced allocation:
+• Convex Region 0 will hold "Nankai".
+• Convex Region 1 will hold "Univer".
+• Convex Region 2 will hold "sity".
+Final Result: 
+```json
+{
+    "segmentation":[
+        {
+            "Vertices": [[69, 271], [1, 322], [110, 474], [235, 423]],
+            "Text": "Nankai"
+        },
+        {
+            "Vertices": [[110, 474], [293, 511], [476, 420], [372, 380], [235, 423]],
+            "Text": "Univer"
+        }, 
+        {
+            "Vertices": [[511, 265], [449, 271], [372, 380], [476, 420]], 
+            "Text": "sity"
+        }
+    ], 
+    "diagonals": [
+        [[110,474], [235,423]], 
+        [[476, 420], [372,380]]
+    ]
+}
+```
+
+Vertices: [[10, 232], [71, 280], [163, 195], [331, 160], [456, 268], [501, 206], [406, 80], [243, 62], [106, 114]]
+Angles: [89.07, 99.07, 210.97, 232.6, 85.15, 107.01, 133.32, 152.91, 149.92]
+Texts: "Computer Vision"
+Step 1: Analyze the Shape and Split into Convex Shapes
+The shape is concave due to the inward bends at vertices [163, 195] and [331, 160], which correspond to angles 210.97 and 232.6, respectively. Both angles are greater than 180 degrees.
+Identifying the concave points and applying the diagonals
+1. Split on point [163, 195] to address the inward bend.
+2. Another split on [331, 160] ensures the proper convex division.
+Visualize Splits:
+• Connect [106, 114] and [163, 195].
+• Connect [331, 160] and [406, 80].
+This gives us the following three convex regions:
+Convex Region 0:
+• Vertices: [[10, 232], [71, 280], [163, 195], [106, 114]]
+Convex Region 1:
+• Vertices: [[106, 114], [163, 195], [331, 160], [406, 80], [243, 62]]
+Convex Region 2:
+• Vertices: [[331, 160], [456, 268], [501, 206], [406, 80]]
+Step 2: Distribute the Word "Computer Vision" Across the Convex Shapes
+Since we have 3 regions and "Computer Vision" has 2 words and 15 characters, we can divide the phrase into "Com", "puter Vi", and "sion" according to syllables for balanced allocation.
+• Convex Region 0 will hold "Comp".
+• Convex Region 1 will hold "uter Vi".
+• Convex Region 2 will hold "sion".
+Final Result: 
+```json
+{
+    "segmentation":[
+        {
+            "Vertices": [[10, 232], [71, 280], [163, 195], [106, 114]],
+            "Text": "Comp"
+        },
+        {
+            "Vertices": [[106, 114], [163, 195], [331, 160], [406, 80], [243, 62]],
+            "Text": "uter Vi"
+        }, 
+        {
+            "Vertices": [[331, 160], [456, 268], [501, 206], [406, 80]], 
+            "Text": "sion"
+        }
+    ], 
+    "diagonals": [
+        [[106, 114],[163, 195]],
+        [[331, 160], [406, 80]]
+    ]    
+}
