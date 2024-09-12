@@ -19,23 +19,23 @@ Vertices: [[36, 105],[54, 155],[476, 149],[491, 100]]
 Angles: [70.83, 108.98, 107.84, 72.35]
 Texts: "Deep learning"
 Step 1: Analyze the Shape and Split into Convex Shapes
-The shape is convex due to no obvious bend, since No angle is greater than 180. 
-This gives us the following 1 convex region:
-Convex Region 0
-• Vertices: [[491, 100],[36, 105],[54, 155],[476, 149]]
-Step 2: Distribute the Word "snowman" Across the Convex Shapes
-Since we have 1 regions, we can assign "Deep learning" to Convex Region 0:
-• Convex Region 0 will hold "Deep Learning".
-Final Result:
+Examining the angles provided:
+• None of the vertices has an angle greater than 180 degrees.
+• Since all angles are less than 180 degrees, the shape is convex and does not need to be divided into multiple regions based on concavity.
+Step 2: No Splitting Needed
+Given that the entire shape is convex, there is no need for any division. All vertices form a single region:
+• Region: [[36, 105], [54, 155], [476, 149], [491, 100]]
+Step 3: Distributing Text
+The entire text "Deep learning" is assigned to the only region available. The region is entirely convex and capable of holding the entire text as it is not required to split the text among multiple regions.
+Final Output
 ```json
 {
-    "segmentation":[
+    "segmentation": [
         {
-            "Vertices": [[491, 100],[36, 105],[54, 155],[476, 149]],
-            "Text": "Deep Learning"
-        },
-    ],
-    "diagonals": []
+            "Vertices": [[36, 105], [54, 155], [476, 149], [491, 100]],
+            "Text": "Deep learning"
+        }
+    ]
 }
 ```
 
@@ -43,31 +43,38 @@ Vertices: [[51, 242], [115, 283], [258, 177], [386, 277], [434, 218], [257, 67],
 Angles: [99.45, 110.81, 254.55, 91.13, 91.34, 105.27, 147.46]
 Texts: "Deep learning"
 Step 1: Analyze the Shape and Split into Convex Shapes
+First, we need to identify the inward bending points, or concave vertices, where the angle exceeds 180 degrees. Based on the given angles:
 Vertices: [[51, 242], [115, 283], [258, 177], [386, 277], [434, 218], [257, 67], [72, 193]]
 Angles: [99.45, 110.81, 254.55, 91.13, 91.34, 105.27, 147.46]
-
-Observations:
-- Most angles are less than 180 degrees indicating convex corners.
-- A significant angle at Vertex [258, 177] is 254.55 degrees, which is greater than 180 degrees, showing a concave bend.
-Based on this information, we'll target Vertex [258, 177] for splitting the shape to form proper convex polygons. We'll introduce a diagonal to divide the shape in a way that no convex region has less than 4 vertices.
-Choice of Diagonal: Connect Vertex [258, 177] with another suitable vertex to partition the shape effectively. The chosen point should minimize crossing of edges and satisfy convexity. Most suitable point is Vertex [257, 67] for it's not adjacent to [258, 177] and separate the shape balancedly.
-Visualize Divisions:
-1. Connect [258, 177] with [257, 67].
-This potential split aims to create two convex shapes:
-- Shape 1: Vertex sequence: [[51, 242], [115, 283], [258, 177], [257, 67], [72, 193]]
-- Shape 2: Vertex sequence: [[258, 177], [386, 277], [434, 218], [257, 67]]
-
-We now evaluate this new division:
-- Verify each newly formed region is convex. This may require calculating angles of newly formed polygons.
-- Ensure there are more than three vertices in each segment to meet the problem's criteria for convex regions.
-
-Step 2: Distribute the Text "Deep Learning" Across the Convex Shapes
-Given two regions, we need to distribute the text between them. Since both regions are significant, but their sizes might differ slightly:
-Length Estimation (Heuristic):
-- Roughly estimate by counting vertices or using spatial distance among vertices.
-- Assign more text to the larger region.
-Distribute Text:
-- Divide "Deep Learning" into roughly appropriate segments based on estimated region sizes. The 2 region seems to be about the same size. "Deep Lea" for one and "rning" for another, considering readability and size constraints.
+From the above, only the vertex at [258, 177] has an angle greater than 180 degrees (254.55 degrees).
+Step 2: Splitting the Shape into Convex Regions
+Now, we need to connect this concave vertex with non-adjacent vertices to form convex regions. Ideally, the connection should:
+• Be the closest non-adjacent vertex in terms of Euclidean distance.
+• Ensure all resulting regions contain at least 4 vertices.
+For vertex [258, 177]:
+• It is adjacent to [115, 283] and [386, 277].
+• Consider connecting to [51, 242], [72, 193], [434, 218], and [257, 67].
+Distance calculations (calculated by suming the Absolute value of (x1-x2) and (y1-y2)):
+• To [51, 242]: Approximately |258-51|+|177-242|=207+65=272
+• To [72, 193]: Approximately |258-72|+|177-193|=186+18=204
+• To [434, 218]: Approximately |248-434|+|177-218|=186+48=234
+• To [257, 67]: Approximately |258-257|+|177-67|=1+110=111
+The shortest distance is to [257, 67] and it is not connected with other diagonals before.
+The connections that can be made:
+• [258, 177] to [72, 193]
+This results in two convex regions:
+Region 1: [[51, 242], [115, 283], [258, 177], [257, 67], [72, 193]]
+Region 2: [[258, 177], [386, 277], [434, 218], [257, 67]]
+Every region have at least 4 vertices each.
+Step 3: Distributing Text
+Now that we have two convex regions, we need to distribute the text "Deep learning" based on the relative size of the regions.
+Region Sizes: 
+• Region 1: maximum x - minmum x + maximum y - minmum y = 258 - 51 + 283 - 67 = 207 + 216 = 513
+• Region 2: maximum x - minmum x + maximum y - minmum y = 434 - 257 + 277 - 67 = 177 + 210 = 387
+The Region 1 seems to be larger than region 2. 
+Text Allocation:
+"Deep learning" consists of two words and 13 characters. Region 1 is larger than Region 2 so more characters should be assigned. 
+Assign "Deep Le" to Region 1 and "arning" to Region 2.
 Final Output
 ```json
 {
@@ -91,26 +98,48 @@ Vertices: [[0, 180], [65, 244], [182, 101], [286, 82], [419, 228], [496, 188], [
 Angles: [95.56, 84.73, 220.36, 238.02, 104.88, 95.05, 150.03, 139.21, 132.16]
 Texts: "Snowman"
 Step 1: Analyze the Shape and Split into Convex Shapes
-The shape is concave due to the inward bend at [182, 101] and [286, 82] for their corresponding angle is 220.36 and 238.02 which are both greater than 180, so we need to identify where to split it to form convex polygons. So we use diagonals between non-adjacent points to divide the concave shape into simpler convex regions.
-We will use these splitting points based on the coordinates:
-1. Split on point [182, 101] to handle the concave inward bend near points [286, 82] and [136, 12].
-2. Another split on point [286, 82] will ensure proper convex division.
-Visualize Splits:
-• Connect [182,101] and [136,12].
-• Connect [286,82] and [353,0].
-This gives us the following three convex regions:
-Convex Region 0 (Left Region)
-• Vertices: [[0, 180], [65, 244], [182, 101], [136, 12]]
-Convex Region 1 (Upper Middle Region)
-• Vertices: [[182, 101], [286, 82], [353, 0], [136, 12]]
-Convex Region 2 (Right Region)
-• Vertices: [[286, 82], [419, 228], [496, 188], [449, 74], [353, 0]]
-Step 2: Distribute the Word "snowman" Across the Convex Shapes
-Since we have 3 regions, with the Convex Region 0 and 2 are comparatively longer than Convex Region 1, we can split the texts "snowman" into "sno", "w","man" according to syllables for balanced allocation:
-• Convex Region 0 will hold "sno".
-• Convex Region 1 will hold "w".
-• Convex Region 2 will hold "man".
-Final Result: 
+From the given angles:
+• The vertices at [182, 101] and [286, 82] have angles greater than 180 degrees, which are 220.36 and 238.02 respectively. These points are identified as inward bending points.
+Step 2: Splitting the Shape into Convex Regions
+Connection Diagonals:
+To form convex regions, we need to connect these concave vertices with non-adjacent vertices that are closest in Euclidean distance (calculated by suming the Absolute value of (x1-x2) and (y1-y2)):
+• For vertex [182, 101]:
+  • Non-adjacent vertices: 
+    • [419, 228]: distance |419-182|+|228-101|=364
+    • [496, 188]: distance |496-182|+|188-101|=401
+    • [449, 74]: distance |449-182|+|74-101|=294
+    • [353, 0]: distance |353-182|+|0-101|=272
+    • [136, 12]: distance |136-182|+|12-101|=135
+    • [0, 180]: distance |0-182|+|180-101|=261
+  • Closest in distance is [136, 12].
+• For vertex [286, 82]:
+  • Non-adjacent vertices: 
+    • [65, 244]: distance |65-286|+|244-82|=383
+    • [0, 180]: distance |0-286|+|180-82|=384
+    • [136, 12]: This point has been chosen by [182, 101], consequently we don't take this into account. 
+    • [353, 0]: distance |353-286|+|0-82|=149
+    • [449, 74]: distance |449-286|+|74-82|=171
+    • [496, 188]: distance |496-286|+|188-82|=316
+  • Closest in distance is [353, 0].
+Forming Regions:
+With these connections:
+• [182, 101] to [136, 12]
+• [286, 82] to [353, 0]
+This forms the following convex regions:
+1. Region 1: [[0, 180], [65, 244], [182, 101], [136, 12]]
+2. Region 2: [[182, 101], [286, 82], [449, 74], [353, 0]]
+3. Region 3: [[286, 82], [419, 228], [496, 188], [449, 74]]
+Step 3: Distributing Text
+Based on the relative size of these regions:
+• Calculate region size with maximum x - minimum x + maximum y - minimum y.
+• Region 1: 182 - 0 + 244 - 12 = 182 + 232 = 414
+• Region 2: 449 - 182 + 101 - 0 = 267 + 101 = 368
+• Region 3: 496 - 286 + 228 - 74 = 210 + 154 = 364
+Text Allocation:
+• "Snowman" consists of one word and 7 characters.
+• Given the sizes, assign more characters to the largest region.
+• Assign "Sno" to Region 1 and distribute wm" to Region 2 and give "an" Region 3.
+Final Output
 ```json
 {
     "segmentation":[
@@ -120,11 +149,11 @@ Final Result:
         },
         {
             "Vertices": [[182, 101], [286, 82], [353, 0], [136, 12]],
-            "Text": "w"
+            "Text": "wm"
         },
         {
             "Vertices": [[286, 82], [419, 228], [496, 188], [449, 74], [353, 0]],
-            "Text": "man"
+            "Text": "an"
         }
     ],
     "diagonals": [
