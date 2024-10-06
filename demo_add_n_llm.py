@@ -24,7 +24,7 @@ import einops
 import time
 from PIL import Image
 
-from mllm import GPT4_geometry, GPT4_textsplit
+from mllm import GPT4_maskGen, get_pos_n_glyph
 from util import check_channels, resize_image, save_images, arr2tensor,check_overlap_polygon,get_lines,count_lines,sep_mask,draw_pos
 from t3_dataset import draw_glyph, draw_glyph2, draw_glyph3, draw_glyph4, get_caption_pos
 
@@ -78,7 +78,7 @@ def parse_args():
     parser.add_argument(
         "--config_yaml",
         type=str,
-        default="./models_yaml/anytext_sd15_masa.yaml",
+        default="./models_yaml/anytext_sd15.yaml",
     )
     parser.add_argument(
         "--save_path",
@@ -200,10 +200,7 @@ def inference(input_data, **params):
     seed_everything(seed)
     if save_memory:
         model.low_vram_shift(is_diffusing=False)
-    pos_imgs = input_data["draw_pos"]
-    polygons = sep_mask(pos_imgs, params["sort_priority"]) # list([numpoints, 1, 2]) 
     info = {}
-    info["ori_prompt"] = prompt + "," + params["a_prompt"]
     info["glyphs"] = []
     info["gly_line"] = []
     info["positions"] = []
@@ -211,61 +208,56 @@ def inference(input_data, **params):
     info["Mats_r"] = []
     info["lambda"]=params["lambda"]
     info["step_size"]=params["step_size"]
-    # info["font"] = font
-    texts, prompt = get_lines(prompt)
+    positions = []
     now = datetime.datetime.now()
     date_str = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%H_%M_%S")
+    save_with_para = os.path.join(img_save_folder,f"""alpha_{params["alpha"]}_beta_{params["beta"]}_theta_{params["theta"]}_{int(params["start_op_step"])}->{int(params["end_op_step"])}_{int(params["OPTIMIZE_STEPS"])}""",date_str)
+    if not os.path.exists(os.path.join(save_with_para, "glyph")):
+        os.makedirs(os.path.join(save_with_para, "glyph"))
     # %--------------------------------------%
     # LLM separating masks
-    new_polygons = []
-    OPENAI_API_KEY = "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"
-    for idx, text in enumerate(texts):
-        response = GPT4_geometry(text, polygons[idx], OPENAI_API_KEY, "gpt-4o")
-        # mask split
-        # print(response)
-        diagonals = response["diagonals"]
-        if len(diagonals) == 0:
-            new_polygons += polygons[idx]
-            continue
-        img = (draw_pos(polygons[idx], 1.0) * 255).astype(np.uint8)
-        for diag in diagonals:
-            cv2.line(img, tuple(diag[0]), tuple(diag[1]), (0), 30)
-        new_polygons += sep_mask(img, params["sort_priority"])
-
-        # Text split
-        new_areas = [cv2.contourArea(p) for p in new_polygons]
-        Texts_json = GPT4_textsplit(text, new_areas, OPENAI_API_KEY, "gpt-4o")
-        new_text = ""
-        for j, txt in enumerate(Texts_json["Texts"]):
-            if j!=0:
-                new_text += ", "
-            new_text += '"' + txt + '"'
-        prompt = input_data["prompt"].replace('"' + text + '"', new_text)
-    polygons = new_polygons
-    save_with_para = os.path.join(img_save_folder,f"""alpha_{params["alpha"]}_beta_{params["beta"]}_theta_{params["theta"]}_{int(params["start_op_step"])}->{int(params["end_op_step"])}_{int(params["OPTIMIZE_STEPS"])}""",date_str)
-    if not os.path.exists(os.path.join(save_with_para, "pos")):
-        os.makedirs(os.path.join(save_with_para, "pos"))
-    cv2.imwrite(os.path.join(save_with_para, "pos",f"{time_str}.png"), 255 - img)
-    texts,prompt = get_lines(prompt)
+    if params["use_gpt"]:
+        texts = []
+        info["texts"] = []
+        OPENAI_API_KEY = "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"
+        _, prompt = get_lines(prompt)
+        pos_json = GPT4_maskGen(input_data["prompt"],OPENAI_API_KEY,api_model="gpt-4o")
+        for idx,js in enumerate(pos_json):
+            tx = js["Texts"]
+            texts+=[tx]
+            info["texts"] += [js["Texts"]]
+            cx,cy,w,h,angle = js["OBB"]
+            cx = cx * W
+            cy = cy * H
+            h = h * H
+            w = w * W
+            pos, glyphs = get_pos_n_glyph(cx,cy,w,h,angle,tx)
+            positions+=[pos]
+            info["glyphs"] += [arr2tensor(glyphs, params["image_count"])]
+            info["positions"] += [arr2tensor(positions[idx], params["image_count"])] # shape [batch_size ,1 , 512, 512]
+            if idx==0:
+                replace_str = '" * "'
+            else: 
+                replace_str += ', " * "'
+        prompt = prompt.replace('" * "', replace_str)
     # %--------------------------------------%
-    info["polygons"] = polygons
-    info["texts"] =  texts
-    info["angles"] = []
-    positions = []
+    else: 
+        pos_imgs = input_data["draw_pos"]
+        polygons = sep_mask(pos_imgs, params["sort_priority"]) # list([numpoints, 1, 2]) 
+        info["polygons"] = polygons
+        texts, prompt = get_lines(prompt)
+        info["texts"] =  texts
+        for idx,text in enumerate(texts):
+            glyphs, angle, center = draw_glyph3(ImageFont.truetype(params["Font_path"],size=60), text, polygons[idx], scale=2)
+            cv2.imwrite(os.path.join(save_with_para, "glyph",f"{time_str}_{idx}.png"), glyphs*255)
+            info["glyphs"] += [arr2tensor(glyphs, params["image_count"])]  
+        for idx, poly in enumerate(polygons):
+            positions += [draw_pos(poly, 1.0)]
+            info["positions"] += [arr2tensor(positions[idx], params["image_count"])] # shape [batch_size ,1 , 512, 512]
     for idx, text in enumerate(texts):
         gly_line = draw_glyph(font, text)
-        glyphs, angle, center = draw_glyph3(font, text, polygons[idx], scale=2)
-        info["angles"] += [angle]
-        save_with_para = os.path.join(img_save_folder,f"""alpha_{params["alpha"]}_beta_{params["beta"]}_theta_{params["theta"]}_{int(params["start_op_step"])}->{int(params["end_op_step"])}_{int(params["OPTIMIZE_STEPS"])}""",date_str)
-        if not os.path.exists(os.path.join(save_with_para, "glyph")):
-            os.makedirs(os.path.join(save_with_para, "glyph"))
-        cv2.imwrite(os.path.join(save_with_para, "glyph",f"{time_str}_{idx}.png"), glyphs*255)
         info["gly_line"] += [arr2tensor(gly_line, params["image_count"])]
-        info["glyphs"] += [arr2tensor(glyphs, params["image_count"])]   
-    for idx, poly in enumerate(polygons):
-        positions += [draw_pos(poly, 1.0)]
-        info["positions"] += [arr2tensor(positions[idx], params["image_count"])] # shape [batch_size ,1 , 512, 512]
     # padding
     n_lines = min(len(texts), max_lines)
 
@@ -409,8 +401,9 @@ def process(
     loss_alpha,
     loss_beta,
     add_theta,
+    use_gpt,
+    font_path,
     *rect_list,
-    angle=0,
 ):
     torch.cuda.empty_cache()
     n_lines = count_lines(prompt)
@@ -496,6 +489,8 @@ def process(
         "alpha":loss_alpha,
         "beta":loss_beta,
         "theta":add_theta,
+        "use_gpt": use_gpt,
+        "Font_path": font_path,
     }
     input_data = {
         "prompt": prompt,
@@ -585,8 +580,10 @@ with block:
                 height=600,
             )
             result_info = gr.Markdown("", visible=False)
+            Font_path = gr.Textbox(label="字体路径", value="./font/Arial_Unicode.ttf")
             with gr.Row():
                 gr.Markdown("")
+                use_gpt = gr.Checkbox(label="Use GPT(是否使用gpt生成mask)", value=True)
                 run_gen = gr.Button(value="Run(运行)!", scale=0.3, elem_classes="run")
                 gr.Markdown("")
             with gr.Row():
@@ -1322,6 +1319,8 @@ with block:
         loss_alpha,
         loss_beta,
         add_theta,
+        use_gpt,
+        Font_path,
         *(rect_cb_list + rect_xywh_list),
     ]
     run_gen.click(
