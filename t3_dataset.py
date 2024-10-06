@@ -124,7 +124,7 @@ def draw_glyph2(font, text, polygon, vertAng=10, scale=1, width=512, height=512,
 
 
 def draw_glyph3(
-    font, text, polygon, vertAng=10, scale=1, width=512, height=512, add_space=True, offset_angle=0
+    font, text, polygon, scale=1, width=512, height=512, add_space=True, offset_angle=0
 ):
     enlarge_polygon = polygon * scale
     rect = cv2.minAreaRect(enlarge_polygon)
@@ -249,6 +249,9 @@ def get_caption_pos(ori_caption, pos_idxs, prob=1.0, place_holder='*'):
 def draw_glyph4(
     font, text, polygon, vertAng=10, scale=1, width=512, height=512, add_space=True, offset_angle=0
 ):
+    """
+    Glyph remains in the center of the image
+    """
     enlarge_polygon = polygon * scale
     rect = cv2.minAreaRect(enlarge_polygon)
     box = cv2.boxPoints(rect)
@@ -342,10 +345,11 @@ def draw_glyph4(
     x_offset = int((img.width - rotated_layer.width) / 2)
     y_offset = int((img.height - rotated_layer.height) / 2)
     img.paste(rotated_layer, (x_offset, y_offset), rotated_layer)
-    new_poly = np.array([[int(x_offset/2), int((y_offset+rotated_layer.height) / 2)],
-                [int((x_offset+rotated_layer.width)/2), int((y_offset+rotated_layer.height)/2)],
-                [int((x_offset+rotated_layer.width)/2), int(y_offset/2)],
-                [int(x_offset/2), int(y_offset/2)]])
+    new_poly = np.array([[int(img.width // 2 - text_width // 2), int(img.height // 2  + text_height // 2 - top)],
+                [int(img.width // 2 + text_width // 2), int(img.height // 2  + text_height // 2 - top)],
+                [int(img.width // 2 + text_width // 2), int(img.height // 2  - text_height // 2 - top)],
+                [int(img.width // 2 - text_width // 2), int(img.height // 2  - text_height // 2 - top)]])
+    # print(new_poly)
     img = np.expand_dims(np.array(img.convert("1")), axis=2).astype(np.float64)
     return img, new_poly
 

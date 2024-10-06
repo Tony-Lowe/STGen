@@ -5,6 +5,7 @@ Code: https://github.com/tyxsspa/AnyText
 Copyright (c) Alibaba, Inc. and its affiliates.
 """
 
+import datetime
 import os
 import torch
 from modelscope.pipelines import pipeline
@@ -15,7 +16,7 @@ import numpy as np
 import re
 import json
 import argparse
-from PIL import ImageFont
+from PIL import ImageFont,Image
 from gradio.components import Component
 from pytorch_lightning import seed_everything
 import einops
@@ -267,14 +268,20 @@ def inference(input_data, **params):
     if save_memory:
         model.low_vram_shift(is_diffusing=False)
     pos_imgs = input_data["draw_pos"]
-    polygons = sep_mask(pos_imgs,sort_radio=params["sort_priority"])
+    polygons = sep_mask(pos_imgs,params["sort_priority"])
     info = {}
+    if not os.path.exists(os.path.join(img_save_folder, "Glyph")):
+        os.makedirs(os.path.join(img_save_folder, "Glyph"))
+    # glyph_save = os.path.join(img_save_folder, "Glyph", f"{prompt}.png")
+    num = 0
+    while os.path.exists(os.path.join(img_save_folder, "Glyph", f"{num}.png")):
+        num+=1
     info["ori_prompt"] = prompt + "," + params["a_prompt"]
-    info["attn_ctrl"] = AttentionStore()
     info["glyphs"] = []
     info["polygons"] = polygons
     info["gly_line"] = []
     info["positions"] = []
+    info["attn_ctrl"] = AttentionStore()
     # info["font"] = font
     texts, prompt = get_lines(prompt)
     info["texts"] =  texts
@@ -283,7 +290,16 @@ def inference(input_data, **params):
     # print(texts)
     for idx, text in enumerate(texts):
         gly_line = draw_glyph(font, text)
-        glyphs, angle, center = draw_glyph3(font, text, polygons[idx], scale=2)
+        if params["glyph_image"] is not None:
+            print("Using glyph_image")
+            glyphs = np.expand_dims(Image.fromarray(params["glyph_image"]).convert('1'), axis=2).astype(np.float64)
+            # print(glyphs.shape)
+        else:
+            print("Glyph generated according to the mask")
+            glyphs, angle, center = draw_glyph3(font, text, polygons[idx], scale=2)
+        glyph_save = os.path.join(img_save_folder, "Glyph", f"{num}.png")
+        cv2.imwrite(glyph_save, glyphs*255)
+        num+=1
         info["gly_line"] += [arr2tensor(gly_line, params["image_count"])]
         info["glyphs"] += [arr2tensor(glyphs, params["image_count"])]   
     # cv2.destroyAllWindows()
@@ -350,18 +366,21 @@ def inference(input_data, **params):
 
     for idx, x_inter in enumerate(intermediates["x_inter"]):
         # print(idx)
-        x_inter = model.decode_first_stage(x_inter)
+        now = datetime.datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        time_str = now.strftime("%H_%M_%S")
+        # x_inter = model.decode_first_stage(x_inter)
         decode_x0 = model.decode_first_stage(intermediates["pred_x0_other"][idx])
         decode_x0 = torch.clamp(decode_x0, -1, 1)
         decode_x0 = (decode_x0 + 1.0) / 2.0 * 255  # -1,1 -> 0,255; n, c,h,w
         decode_x0 = einops.rearrange(decode_x0, "b c h w -> b h w c").cpu().numpy().clip(0, 255).astype(np.uint8)
-        x_inter = (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
-        if not os.path.exists(os.path.join(img_save_folder,"inter")):
-            os.makedirs(os.path.join(img_save_folder, "inter"))
-        cv2.imwrite(os.path.join(img_save_folder, "inter",f"{idx}.png"), x_inter[0])
-        if not os.path.exists(os.path.join(img_save_folder, "inter_other")):
-            os.makedirs(os.path.join(img_save_folder, "inter_other"))
-        cv2.imwrite(os.path.join(img_save_folder, "inter_other",f"{idx}.png"), decode_x0[0])
+        # x_inter = (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
+        # if not os.path.exists(os.path.join(img_save_folder,"inter")):
+        #     os.makedirs(os.path.join(img_save_folder, "inter"))
+        # cv2.imwrite(os.path.join(img_save_folder, "inter",f"{idx}.png"), x_inter[0])
+        if not os.path.exists(os.path.join(img_save_folder,date_str, "inter_other")):
+            os.makedirs(os.path.join(img_save_folder,date_str, "inter_other"))
+        cv2.imwrite(os.path.join(img_save_folder,date_str, "inter_other",f"{time_str}_{idx}.png"), decode_x0[0])
 
     cost = (time.time() - tic) * 1000.0
     if save_memory:
@@ -405,8 +424,8 @@ def process(
     n_prompt,
     times,
     times1,
+    glyph_image,
     *rect_list,
-    angle=0,
 ):
     n_lines = count_lines(prompt)
     # Text Generation
@@ -483,6 +502,7 @@ def process(
         "lora_path_ratio": lora_path_ratio,
         "times":times,
         "times1":times1,
+        "glyph_image": glyph_image,
     }
     input_data = {
         "prompt": prompt,
@@ -521,11 +541,6 @@ def resize_h(h, img1, img2):
     if isinstance(img2, dict):
         img2 = img2["image"]
     return [cv2.resize(img1, (img1.shape[1], h)), cv2.resize(img2, (img2.shape[1], h))]
-
-
-def mask_upload(mask_path):
-    mask_pic = cv2.imread(mask_path.name)
-    return mask_pic
 
 
 is_t2i = "true"
@@ -849,6 +864,18 @@ with block:
                         show_label=False,
                         brush_radius=100,
                     )
+
+                    with gr.Row(variant="compact"):
+                        glyph_image = gr.Image(label="Glyph Image(字样图)", source="upload")
+
+                    def upload_glyph(x):
+                        return gr.Image(value=x)
+
+                    def clear_glyph(x):
+                        return gr.Image(source="upload", tool=None)
+
+                    glyph_image.upload(upload_glyph, glyph_image, glyph_image)
+                    glyph_image.clear(clear_glyph, glyph_image, glyph_image)
 
                     def re_draw():
                         return [
@@ -1282,6 +1309,7 @@ with block:
         n_prompt,
         Clip_times,
         Clip_times1,
+        glyph_image,
         *(rect_cb_list + rect_xywh_list),
     ]
     run_gen.click(
@@ -1294,6 +1322,11 @@ with block:
         inputs=[gr.State("edit")] + ips,
         outputs=[result_gallery, result_info],
     )
+
+    def mask_upload(mask_path):
+        mask_pic = cv2.imread(mask_path.name)
+        return mask_pic
+
     upload_button.upload(mask_upload,inputs=[upload_button],outputs=[draw_img])
 
 

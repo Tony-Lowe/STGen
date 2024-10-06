@@ -6,7 +6,9 @@ Copyright (c) Alibaba, Inc. and its affiliates.
 """
 
 import datetime
+import enum
 import os
+from urllib import response
 import torch
 from modelscope.pipelines import pipeline
 import cv2
@@ -23,7 +25,7 @@ import einops
 import time
 from PIL import Image
 
-from util import check_channels, resize_image, save_images, arr2tensor
+from util import check_channels, resize_image, save_images, arr2tensor,check_overlap_polygon,get_lines,count_lines,sep_mask,draw_pos
 from t3_dataset import draw_glyph, draw_glyph2, draw_glyph3, draw_glyph4, get_caption_pos
 
 BBOX_MAX_NUM = 8
@@ -76,7 +78,7 @@ def parse_args():
     parser.add_argument(
         "--config_yaml",
         type=str,
-        default="./models_yaml/anytext_sd15_masa.yaml",
+        default="./models_yaml/anytext_sd15.yaml",
     )
     parser.add_argument(
         "--save_path",
@@ -112,28 +114,6 @@ if load_model:
     # print(model.control_model.input_blocks[5][1].transformer_blocks[0])
 
 font = ImageFont.truetype("./font/Arial_Unicode.ttf", size=60)
-
-
-def count_lines(prompt):
-    prompt = prompt.replace("“", '"')
-    prompt = prompt.replace("”", '"')
-    p = '"(.*?)"'
-    strs = re.findall(p, prompt)
-    if len(strs) == 0:
-        strs = [" "]
-    return len(strs)
-
-
-def get_lines(prompt):
-    prompt = prompt.replace("“", '"')
-    prompt = prompt.replace("”", '"')
-    p = '"(.*?)"'
-    strs = re.findall(p, prompt)
-    if len(strs) == 0:
-        strs = [" "]
-    for strs_idx, strs_item in enumerate(strs):
-        prompt = prompt.replace('"' + strs_item + '"', '"' + f" {PLACE_HOLDER} " + '"')
-    return strs, prompt
 
 
 def generate_rectangles(w, h, n, max_trys=200):
@@ -192,22 +172,6 @@ def generate_rectangles(w, h, n, max_trys=200):
         )
     return img
 
-
-def check_overlap_polygon(rect_pts1, rect_pts2):
-    poly1 = cv2.convexHull(rect_pts1)
-    poly2 = cv2.convexHull(rect_pts2)
-    rect1 = cv2.boundingRect(poly1)
-    rect2 = cv2.boundingRect(poly2)
-    if (
-        rect1[0] + rect1[2] >= rect2[0]
-        and rect2[0] + rect2[2] >= rect1[0]
-        and rect1[1] + rect1[3] >= rect2[1]
-        and rect2[1] + rect2[3] >= rect1[1]
-    ):
-        return True
-    return False
-
-
 def draw_rects(width, height, rects):
     img = np.zeros((height, width, 1), dtype=np.uint8)
     for rect in rects:
@@ -219,39 +183,6 @@ def draw_rects(width, height, rects):
         y2 = y1 + h
         cv2.rectangle(img, (x1, y1), (x2, y2), 255, -1)
     return img
-
-
-def sep_mask(pos_imgs, sort_radio="↕"):
-    # print(pos_imgs.max())
-    pos_imgs = cv2.cvtColor(pos_imgs, cv2.COLOR_BGR2GRAY)
-    _, pos_imgs = cv2.threshold(pos_imgs, 254, 255, cv2.THRESH_BINARY)
-    # cv2.imshow('image',pos_imgs)
-    # cv2.waitKey(0)
-    contours, _ = cv2.findContours(pos_imgs, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    # print(contours)
-    if sort_radio == "↕":
-        contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[1])
-    else:
-        contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[0])
-    # poly = []
-    # for contour in contours:
-    #     rect = cv2.minAreaRect(contour)
-    #     box = cv2.boxPoints(rect)
-    #     box = np.intp(box)
-    #     poly.append(box)
-    # print(poly)
-    # return poly
-    return contours
-
-
-def draw_pos(ploygon, prob=1.0):
-    img = np.zeros((512, 512, 1))
-    if random.random() < prob:
-        pts = ploygon.reshape((-1, 1, 2))
-        cv2.fillPoly(img, [pts], color=255)
-    # cv2.imshow("image", img)
-    # cv2.waitKey(0)
-    return img / 255.
 
 def inference(input_data, **params):
     ddim_sampler = myDDIMSampler(
@@ -270,11 +201,10 @@ def inference(input_data, **params):
     if save_memory:
         model.low_vram_shift(is_diffusing=False)
     pos_imgs = input_data["draw_pos"]
-    polygons = sep_mask(pos_imgs, params["sort_priority"])
+    polygons = sep_mask(pos_imgs, params["sort_priority"]) # list([numpoints, 1, 2]) 
     info = {}
     info["ori_prompt"] = prompt + "," + params["a_prompt"]
     info["glyphs"] = []
-    info["polygons"] = polygons
     info["gly_line"] = []
     info["positions"] = []
     info["angles"] = []
@@ -283,11 +213,51 @@ def inference(input_data, **params):
     info["step_size"]=params["step_size"]
     # info["font"] = font
     texts, prompt = get_lines(prompt)
+    now = datetime.datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H_%M_%S")
+    # %--------------------------------------%
+    # LLM separating masks
+    # new_polygons = []
+    # OPENAI_API_KEY = "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"
+    # for idx, text in enumerate(texts):
+    #     response = GPT4(text, polygons[idx], OPENAI_API_KEY, "gpt-4o")
+    #     # mask split
+    #     # print(response)
+    #     diagonals = response["diagonals"]
+    #     img = (draw_pos(polygons[idx], 1.0) * 255).astype(np.uint8)
+    #     for diag in diagonals:
+    #         cv2.line(img, tuple(diag[0]), tuple(diag[1]), (0), 30)
+    #     new_polygons += sep_mask(img, "↔")
+    #
+    #     # Text split
+    #     new_text = ""
+    #     for j,seg in enumerate(response["segmentation"]):
+    #         if j!=0:
+    #             new_text += ", "
+    #         if seg["Text"] == "":
+    #             continue
+    #         new_text += '"' + seg["Text"] + '"'
+    #     prompt = input_data["prompt"].replace('"' + text + '"', new_text)
+    # polygons = new_polygons
+    # save_with_para = os.path.join(img_save_folder,f"""alpha_{params["alpha"]}_beta_{params["beta"]}_theta_{params["theta"]}_{int(params["start_op_step"])}->{int(params["end_op_step"])}_{int(params["OPTIMIZE_STEPS"])}""",date_str)
+    # if not os.path.exists(os.path.join(save_with_para, "pos")):
+    #     os.makedirs(os.path.join(save_with_para, "pos"))
+    # cv2.imwrite(os.path.join(save_with_para, "pos",f"{time_str}.png"), 255 - img)
+    # texts,prompt = get_lines(prompt)
+    # %--------------------------------------%
+    info["polygons"] = polygons
     info["texts"] =  texts
     positions = []
+    info["angles"] = []
     for idx, text in enumerate(texts):
         gly_line = draw_glyph(font, text)
-        glyphs, angle, center = draw_glyph3(font, text, polygons[idx], scale=2)
+        glyphs, angle, center = draw_glyph3(ImageFont.truetype(params["Font_path"],size=60), text, polygons[idx], scale=2)
+        info["angles"] += [angle]
+        save_with_para = os.path.join(img_save_folder,f"""alpha_{params["alpha"]}_beta_{params["beta"]}_theta_{params["theta"]}_{int(params["start_op_step"])}->{int(params["end_op_step"])}_{int(params["OPTIMIZE_STEPS"])}""",date_str)
+        if not os.path.exists(os.path.join(save_with_para, "glyph")):
+            os.makedirs(os.path.join(save_with_para, "glyph"))
+        cv2.imwrite(os.path.join(save_with_para, "glyph",f"{time_str}_{idx}.png"), glyphs*255)
         info["gly_line"] += [arr2tensor(gly_line, params["image_count"])]
         info["glyphs"] += [arr2tensor(glyphs, params["image_count"])]   
     for idx, poly in enumerate(polygons):
@@ -436,6 +406,7 @@ def process(
     loss_alpha,
     loss_beta,
     add_theta,
+    font_path,
     *rect_list,
     angle=0,
 ):
@@ -513,16 +484,17 @@ def process(
         "n_prompt": n_prompt,
         "base_model_path": base_model_path,
         "lora_path_ratio": lora_path_ratio,
-        "times":times,
-        "times1":times1,
-        "step_size":step_size,
-        "lambda":lamb,
-        "start_op_step":int(start_op_step),
-        "end_op_step":int(end_op_step),
-        "OPTIMIZE_STEPS":int(op_steps),
-        "alpha":loss_alpha,
-        "beta":loss_beta,
-        "theta":add_theta,
+        "times": times,
+        "times1": times1,
+        "step_size": step_size,
+        "lambda": lamb,
+        "start_op_step": int(start_op_step),
+        "end_op_step": int(end_op_step),
+        "OPTIMIZE_STEPS": int(op_steps),
+        "alpha": loss_alpha,
+        "beta": loss_beta,
+        "theta": add_theta,
+        "Font_path": font_path,
     }
     input_data = {
         "prompt": prompt,
@@ -612,6 +584,7 @@ with block:
                 height=600,
             )
             result_info = gr.Markdown("", visible=False)
+            Font_path = gr.Textbox(label="字体路径", value="./font/Arial_Unicode.ttf")
             with gr.Row():
                 gr.Markdown("")
                 run_gen = gr.Button(value="Run(运行)!", scale=0.3, elem_classes="run")
@@ -1349,6 +1322,7 @@ with block:
         loss_alpha,
         loss_beta,
         add_theta,
+        Font_path,
         *(rect_cb_list + rect_xywh_list),
     ]
     run_gen.click(

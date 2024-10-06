@@ -5,7 +5,10 @@ Code: https://github.com/tyxsspa/AnyText
 Copyright (c) Alibaba, Inc. and its affiliates.
 """
 
+import datetime
+import enum
 import os
+from urllib import response
 import torch
 from modelscope.pipelines import pipeline
 import cv2
@@ -20,11 +23,11 @@ from gradio.components import Component
 from pytorch_lightning import seed_everything
 import einops
 import time
+from PIL import Image
 
-
-from cldm.ctrl import AttentionStore
-from util import check_channels, resize_image, save_images, arr2tensor
-from t3_dataset import draw_glyph, draw_glyph2,draw_glyph3, get_caption_pos
+from mllm import GPT4_geometry
+from util import check_channels, resize_image, save_images, arr2tensor,check_overlap_polygon,get_lines,count_lines,sep_mask,draw_pos
+from t3_dataset import draw_glyph, draw_glyph2, draw_glyph3, draw_glyph4, get_caption_pos
 
 BBOX_MAX_NUM = 8
 PLACE_HOLDER = "*"
@@ -76,12 +79,12 @@ def parse_args():
     parser.add_argument(
         "--config_yaml",
         type=str,
-        default="./models_yaml/anytext_sd15_show.yaml",
+        default="./models_yaml/anytext_sd15_masa.yaml",
     )
     parser.add_argument(
         "--save_path",
         type=str,
-        default="Result/show",
+        default="Result/masa",
         help="load a specified anytext checkpoint",
     )
     args = parser.parse_args()
@@ -103,38 +106,15 @@ if load_model:
     # inference = pipeline("my-anytext-task", **infer_params)
     from cldm.model import create_model, load_state_dict
     from cldm.ddim_hacked import DDIMSampler
-    from cldm.cldm_show import myDDIMSampler
+    from cldm_mod.ddim_ctc import myDDIMSampler
 
     model = create_model(args.config_yaml).cuda()
     # print(model.cond_stage_model.transformer.text_model.embeddings)
-    model.load_state_dict(load_state_dict(args.model_path, location="cuda"),strict=False)
-    ddim_sampler = myDDIMSampler(model)
+    model.load_state_dict(load_state_dict(args.model_path, location="cuda"),strict=True)
     # print(model.control_model.input_blocks.state_dict().keys())
     # print(model.control_model.input_blocks[5][1].transformer_blocks[0])
 
 font = ImageFont.truetype("./font/Arial_Unicode.ttf", size=60)
-
-
-def count_lines(prompt):
-    prompt = prompt.replace("“", '"')
-    prompt = prompt.replace("”", '"')
-    p = '"(.*?)"'
-    strs = re.findall(p, prompt)
-    if len(strs) == 0:
-        strs = [" "]
-    return len(strs)
-
-
-def get_lines(prompt):
-    prompt = prompt.replace("“", '"')
-    prompt = prompt.replace("”", '"')
-    p = '"(.*?)"'
-    strs = re.findall(p, prompt)
-    if len(strs) == 0:
-        strs = [" "]
-    for strs_idx, strs_item in enumerate(strs):
-        prompt = prompt.replace('"' + strs_item + '"', '"' + f" {PLACE_HOLDER} " + '"')
-    return strs, prompt
 
 
 def generate_rectangles(w, h, n, max_trys=200):
@@ -193,22 +173,6 @@ def generate_rectangles(w, h, n, max_trys=200):
         )
     return img
 
-
-def check_overlap_polygon(rect_pts1, rect_pts2):
-    poly1 = cv2.convexHull(rect_pts1)
-    poly2 = cv2.convexHull(rect_pts2)
-    rect1 = cv2.boundingRect(poly1)
-    rect2 = cv2.boundingRect(poly2)
-    if (
-        rect1[0] + rect1[2] >= rect2[0]
-        and rect2[0] + rect2[2] >= rect1[0]
-        and rect1[1] + rect1[3] >= rect2[1]
-        and rect2[1] + rect2[3] >= rect1[1]
-    ):
-        return True
-    return False
-
-
 def draw_rects(width, height, rects):
     img = np.zeros((height, width, 1), dtype=np.uint8)
     for rect in rects:
@@ -221,40 +185,11 @@ def draw_rects(width, height, rects):
         cv2.rectangle(img, (x1, y1), (x2, y2), 255, -1)
     return img
 
-
-def sep_mask(pos_imgs, sort_radio="↕"):
-    # print(pos_imgs.max())
-    pos_imgs = cv2.cvtColor(pos_imgs, cv2.COLOR_BGR2GRAY)
-    _, pos_imgs = cv2.threshold(pos_imgs, 254, 255, cv2.THRESH_BINARY)
-    # cv2.imshow('image',pos_imgs)
-    # cv2.waitKey(0)
-    contours, _ = cv2.findContours(pos_imgs, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    # print(contours)
-    if sort_radio == "↕":
-        contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[1])
-    else:
-        contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[0])
-    # poly = []
-    # for contour in contours:
-    #     rect = cv2.minAreaRect(contour)
-    #     box = cv2.boxPoints(rect)
-    #     box = np.intp(box)
-    #     poly.append(box)
-    # print(poly)
-    # return poly
-    return contours
-
-
-def draw_pos(ploygon, prob=1.0):
-    img = np.zeros((512, 512, 1))
-    if random.random() < prob:
-        pts = ploygon.reshape((-1, 1, 2))
-        cv2.fillPoly(img, [pts], color=255)
-    # cv2.imshow("image", img)
-    # cv2.waitKey(0)
-    return img / 255.
-
 def inference(input_data, **params):
+    ddim_sampler = myDDIMSampler(
+        model,start_step=params["start_op_step"],end_step=params["end_op_step"], max_op_step=params["OPTIMIZE_STEPS"],loss_alpha=params["alpha"],loss_beta=params["beta"],add_theta=params["theta"]
+    )
+
     (
         H,
         W,
@@ -267,37 +202,70 @@ def inference(input_data, **params):
     if save_memory:
         model.low_vram_shift(is_diffusing=False)
     pos_imgs = input_data["draw_pos"]
-    polygons = sep_mask(pos_imgs,sort_radio=params["sort_priority"])
+    polygons = sep_mask(pos_imgs, params["sort_priority"]) # list([numpoints, 1, 2]) 
     info = {}
     info["ori_prompt"] = prompt + "," + params["a_prompt"]
-    info["attn_ctrl"] = AttentionStore()
     info["glyphs"] = []
-    info["polygons"] = polygons
     info["gly_line"] = []
     info["positions"] = []
+    info["angles"] = []
+    info["Mats_r"] = []
+    info["lambda"]=params["lambda"]
+    info["step_size"]=params["step_size"]
     # info["font"] = font
     texts, prompt = get_lines(prompt)
+    now = datetime.datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H_%M_%S")
+    # %--------------------------------------%
+    # LLM separating masks
+    # new_polygons = []
+    # OPENAI_API_KEY = "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"
+    # for idx, text in enumerate(texts):
+    #     response = GPT4(text, polygons[idx], OPENAI_API_KEY, "gpt-4o")
+    #     # mask split
+    #     # print(response)
+    #     diagonals = response["diagonals"]
+    #     img = (draw_pos(polygons[idx], 1.0) * 255).astype(np.uint8)
+    #     for diag in diagonals:
+    #         cv2.line(img, tuple(diag[0]), tuple(diag[1]), (0), 30)
+    #     new_polygons += sep_mask(img, "↔")
+    #
+    #     # Text split
+    #     new_text = ""
+    #     for j,seg in enumerate(response["segmentation"]):
+    #         if j!=0:
+    #             new_text += ", "
+    #         if seg["Text"] == "":
+    #             continue
+    #         new_text += '"' + seg["Text"] + '"'
+    #     prompt = input_data["prompt"].replace('"' + text + '"', new_text)
+    # polygons = new_polygons
+    # save_with_para = os.path.join(img_save_folder,f"""alpha_{params["alpha"]}_beta_{params["beta"]}_theta_{params["theta"]}_{int(params["start_op_step"])}->{int(params["end_op_step"])}_{int(params["OPTIMIZE_STEPS"])}""",date_str)
+    # if not os.path.exists(os.path.join(save_with_para, "pos")):
+    #     os.makedirs(os.path.join(save_with_para, "pos"))
+    # cv2.imwrite(os.path.join(save_with_para, "pos",f"{time_str}.png"), 255 - img)
+    # texts,prompt = get_lines(prompt)
+    # %--------------------------------------%
+    info["polygons"] = polygons
     info["texts"] =  texts
-    info["prompt"] = prompt + "," + params["a_prompt"]
-    # print(prompt)
-    # print(texts)
+    positions = []
+    info["angles"] = []
     for idx, text in enumerate(texts):
         gly_line = draw_glyph(font, text)
         glyphs, angle, center = draw_glyph3(font, text, polygons[idx], scale=2)
+        info["angles"] += [angle]
+        save_with_para = os.path.join(img_save_folder,f"""beta_{params["beta"]}_{int(params["start_op_step"])}->{int(params["end_op_step"])}_{int(params["OPTIMIZE_STEPS"])}_{info['step_size']}""",date_str)
+        if not os.path.exists(os.path.join(save_with_para, "glyph")):
+            os.makedirs(os.path.join(save_with_para, "glyph"))
+        cv2.imwrite(os.path.join(save_with_para, "glyph",f"{time_str}_{idx}.png"), glyphs*255)
         info["gly_line"] += [arr2tensor(gly_line, params["image_count"])]
         info["glyphs"] += [arr2tensor(glyphs, params["image_count"])]   
-    # cv2.destroyAllWindows()
-    positions = []
     for idx, poly in enumerate(polygons):
         positions += [draw_pos(poly, 1.0)]
         info["positions"] += [arr2tensor(positions[idx], params["image_count"])] # shape [batch_size ,1 , 512, 512]
-    # print(info["positions"][0].shape)
     # padding
     n_lines = min(len(texts), max_lines)
-    info["n_lines"] = n_lines
-    n_pad = max_lines - n_lines
-    if n_pad > 0:
-        positions += [np.zeros((512, 512, 1))] * n_pad
 
     info["n_lines"] = [n_lines] * params["image_count"]
     # get masked_x
@@ -317,17 +285,21 @@ def inference(input_data, **params):
     info["times1"] = params["times1"]
 
     hint = arr2tensor(hint, params["image_count"])
+
+    batch_size = params["image_count"]
+    # prompt = prompt.replace(" * ","")
+    print("Prompt:",prompt)
     cond = model.get_learned_conditioning(
         dict(
             c_concat=[hint],
-            c_crossattn=[[prompt + "," + params["a_prompt"]] * params["image_count"]],
+            c_crossattn=[[prompt + "," + params["a_prompt"]] * batch_size],
             text_info=info,
         )
     )
     un_cond = model.get_learned_conditioning(
         dict(
             c_concat=[hint],
-            c_crossattn=[[params["n_prompt"]] * params["image_count"]],
+            c_crossattn=[[params["n_prompt"]] * batch_size],
             text_info=info,
         )
     )
@@ -336,9 +308,9 @@ def inference(input_data, **params):
         model.low_vram_shift(is_diffusing=True)
     model.control_scales = [params["strength"]] * 13
     tic = time.time()
-    samples, intermediates = ddim_sampler.sample(
+    samples, sampels_other, intermediates = ddim_sampler.sample(
         params["ddim_steps"],
-        params["image_count"],
+        batch_size,
         shape,
         cond,
         log_every_t=1,
@@ -348,26 +320,24 @@ def inference(input_data, **params):
         unconditional_conditioning=un_cond,
     )
 
-    for idx, x_inter in enumerate(intermediates["x_inter"]):
-        # print(idx)
-        x_inter = model.decode_first_stage(x_inter)
-        decode_x0 = model.decode_first_stage(intermediates["pred_x0_other"][idx])
-        decode_x0 = torch.clamp(decode_x0, -1, 1)
-        decode_x0 = (decode_x0 + 1.0) / 2.0 * 255  # -1,1 -> 0,255; n, c,h,w
-        decode_x0 = einops.rearrange(decode_x0, "b c h w -> b h w c").cpu().numpy().clip(0, 255).astype(np.uint8)
-        x_inter = (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
-        if not os.path.exists(os.path.join(img_save_folder,"inter")):
-            os.makedirs(os.path.join(img_save_folder, "inter"))
-        cv2.imwrite(os.path.join(img_save_folder, "inter",f"{idx}.png"), x_inter[0])
-        if not os.path.exists(os.path.join(img_save_folder, "inter_other")):
-            os.makedirs(os.path.join(img_save_folder, "inter_other"))
-        cv2.imwrite(os.path.join(img_save_folder, "inter_other",f"{idx}.png"), decode_x0[0])
+    # for idx, x_inter in enumerate(intermediates["x_inter"]):
+    #     # print(idx)
+    #     x_inter = model.decode_first_stage(x_inter)
+    #     x_inter = (
+    #     (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5)
+    #     .cpu()
+    #     .numpy()
+    #     .clip(0, 255)
+    #     .astype(np.uint8)
+    #     )
+    #     if not os.path.exists(os.path.join(img_save_folder,"inter")):
+    #         os.makedirs(os.path.join(img_save_folder, "inter"))
+    #     cv2.imwrite(os.path.join(img_save_folder, "inter",f"{idx}.png"), x_inter[0])
 
     cost = (time.time() - tic) * 1000.0
     if save_memory:
         model.low_vram_shift(is_diffusing=False)
     x_samples = model.decode_first_stage(samples)
-    # print(x_samples.shape) # 4, 3 512, 512
     x_samples = (
         (einops.rearrange(x_samples, "b c h w -> b h w c") * 127.5 + 127.5)
         .cpu()
@@ -375,7 +345,31 @@ def inference(input_data, **params):
         .clip(0, 255)
         .astype(np.uint8)
     )
-    results = [x_samples[i] for i in range(params["image_count"])]
+    # print(x_samples.shape)
+    now = datetime.datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H_%M_%S")
+    for idx, x_inter in enumerate(intermediates["pred_x0"]):
+        # print(idx)
+        x_inter = model.decode_first_stage(x_inter)
+        x_inter = (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
+        save_with_para = os.path.join(img_save_folder,f"""beta_{params["beta"]}_{int(params["start_op_step"])}->{int(params["end_op_step"])}_{int(params["OPTIMIZE_STEPS"])}_{info['step_size']}""",date_str)
+        if not os.path.exists(os.path.join(save_with_para, "pred_x0")):
+            os.makedirs(os.path.join(save_with_para, "pred_x0"))
+        cv2.imwrite(os.path.join(save_with_para, "pred_x0", f"{idx}.png"), x_inter[0])
+    #     decode_x0 = model.decode_first_stage(intermediates["pred_x0_other"][idx])
+    #     decode_x0 = torch.clamp(decode_x0, -1, 1)
+    #     decode_x0 = (decode_x0 + 1.0) / 2.0 * 255  # -1,1 -> 0,255; n, c,h,w
+    #     decode_x0 = einops.rearrange(decode_x0, "b c h w -> b h w c").cpu().numpy().clip(0, 255).astype(np.uint8)
+    #     if not os.path.exists(os.path.join(save_with_para, "pred_inter")):
+    #         os.makedirs(os.path.join(save_with_para, "pred_inter"))
+    #     cv2.imwrite(os.path.join(save_with_para, "pred_inter",f"{time_str}_{idx}.png"), decode_x0[0])
+
+    results = [x_samples[i] for i in range(batch_size)]
+    x_samples_other = model.decode_first_stage(sampels_other)
+    x_samples_other = ((einops.rearrange(x_samples_other, "b c h w -> b h w c") * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8))
+    # results += [x_samples_other[i] for i in range(batch_size)]
+    # results = x_samples
     results += [cost]
     return results
 
@@ -405,9 +399,18 @@ def process(
     n_prompt,
     times,
     times1,
+    step_size,
+    lamb,
+    op_steps,
+    start_op_step,
+    end_op_step,
+    loss_alpha,
+    loss_beta,
+    add_theta,
     *rect_list,
     angle=0,
 ):
+    torch.cuda.empty_cache()
     n_lines = count_lines(prompt)
     # Text Generation
     if mode == "gen":
@@ -483,6 +486,14 @@ def process(
         "lora_path_ratio": lora_path_ratio,
         "times":times,
         "times1":times1,
+        "step_size":step_size,
+        "lambda":lamb,
+        "start_op_step":int(start_op_step),
+        "end_op_step":int(end_op_step),
+        "OPTIMIZE_STEPS":int(op_steps),
+        "alpha":loss_alpha,
+        "beta":loss_beta,
+        "theta":add_theta,
     }
     input_data = {
         "prompt": prompt,
@@ -494,8 +505,13 @@ def process(
     results = inference(input_data, **params)
     time = results.pop()
     # if rtn_code >= 0:
-    save_images(results, img_save_folder)
-    print(f"Done, result images are saved in: {img_save_folder}")
+    save_with_para = os.path.join(img_save_folder,f"beta_{loss_beta}_{int(start_op_step)}->{int(end_op_step)}_{int(op_steps)}_{step_size}")
+    save_images(results, save_with_para)
+    print(f"Done, result images are saved in: {save_with_para}")
+    #     if rtn_warning:
+    #         gr.Warning(rtn_warning)
+    # else:
+    #     raise gr.Error(rtn_warning)
     return results , gr.Markdown(f"Time: {time}", visible=show_debug)
 
 
@@ -657,7 +673,7 @@ with block:
                         label="Image Count(图片数)",
                         minimum=1,
                         maximum=12,
-                        value=4,
+                        value=1,
                         step=1,
                     )
                     ddim_steps = gr.Slider(
@@ -723,6 +739,20 @@ with block:
                 )
                 base_model_path = gr.Textbox(label="Base Model Path(基模地址)")
                 lora_path_ratio = gr.Textbox(label="LoRA Path and Ratio(lora地址和比例)")
+
+            with gr.Accordion("🛠Optimization Parameters(优化参数)", open=False):
+                with gr.Row(variant="compact"):
+                    step_size = gr.Number(label="Step Size(优化步长)", value=0.1)
+                    lamd = gr.Number(label="Lambda(loss系数)",value=0)
+                    op_step = gr.Number(label="Optimize Steps(优化步数)", value=5)
+                with gr.Row(variant="compact"):
+                    start_op_step = gr.Number(label="Start Optimize Step(结束优化的inference步数)", value=0)
+                    end_op_step = gr.Number(label="End Optimize Step(结束优化的inference步数)", value=10)
+                with gr.Row(variant="compact"):
+                    loss_alpha = gr.Number(label="Alpha(Ocr Loss系数)", value=0)
+                    loss_beta = gr.Number(label="Beta(MSE Loss 系数)", value=1)
+                    add_theta = gr.Number(label="Theta(Add glyph 系数)", value=0)
+
             prompt = gr.Textbox(label="Prompt(提示词)")
             with gr.Tabs() as tab_modes:
                 with gr.Tab(
@@ -908,7 +938,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     33789703,
                                 ],
                                 [
@@ -917,7 +947,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     35621187,
                                 ],
                                 [
@@ -926,7 +956,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     2563689,
                                 ],
                                 [
@@ -935,7 +965,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     88952132,
                                 ],
                                 [
@@ -944,7 +974,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     66273235,
                                 ],
                                 [
@@ -953,7 +983,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     35107824,
                                 ],
                                 [
@@ -962,7 +992,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     True,
-                                    4,
+                                    1,
                                     13246309,
                                 ],
                                 [
@@ -971,7 +1001,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     93424638,
                                 ],
                                 [
@@ -980,7 +1010,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     83866922,
                                 ],
                                 [
@@ -989,7 +1019,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     True,
-                                    4,
+                                    1,
                                     64901362,
                                 ],
                             ],
@@ -1151,49 +1181,49 @@ with block:
                                     'A Minion meme that says "wrong"',
                                     "example_images/ref15.jpeg",
                                     "example_images/edit15.png",
-                                    4,
+                                    1,
                                     39934684,
                                 ],
                                 [
                                     'A pile of fruit with "UIT" written in the middle',
                                     "example_images/ref13.jpg",
                                     "example_images/edit13.png",
-                                    4,
+                                    1,
                                     54263567,
                                 ],
                                 [
                                     'Characters written in chalk on the blackboard that says "DADDY"',
                                     "example_images/ref8.jpg",
                                     "example_images/edit8.png",
-                                    4,
+                                    1,
                                     73556391,
                                 ],
                                 [
                                     'The blackboard says "Here"',
                                     "example_images/ref11.jpg",
                                     "example_images/edit11.png",
-                                    2,
+                                    1,
                                     15353513,
                                 ],
                                 [
                                     'A letter picture that says "THER"',
                                     "example_images/ref6.jpg",
                                     "example_images/edit6.png",
-                                    4,
+                                    1,
                                     72321415,
                                 ],
                                 [
                                     'A cake with colorful characters that reads "EVERYDAY"',
                                     "example_images/ref7.jpg",
                                     "example_images/edit7.png",
-                                    4,
+                                    1,
                                     8943410,
                                 ],
                                 [
                                     'photo of clean sandy beach," " " "',
                                     "example_images/ref16.jpeg",
                                     "example_images/edit16.png",
-                                    4,
+                                    1,
                                     85664100,
                                 ],
                             ],
@@ -1282,6 +1312,14 @@ with block:
         n_prompt,
         Clip_times,
         Clip_times1,
+        step_size,
+        lamd,
+        op_step,
+        start_op_step,
+        end_op_step,
+        loss_alpha,
+        loss_beta,
+        add_theta,
         *(rect_cb_list + rect_xywh_list),
     ]
     run_gen.click(

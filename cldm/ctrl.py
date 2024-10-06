@@ -36,7 +36,7 @@ class AttentionControl(abc.ABC):
 
     def __init__(self):
         self.cur_step = 0
-        self.num_att_layers = 9
+        self.num_att_layers = 16
         self.cur_att_layer = 0
 
 
@@ -51,6 +51,7 @@ class AttentionStore(AttentionControl):
     @staticmethod
     def get_empty_store():
         return {
+            8: [],
             16: [],
             32: [],
             64: [],

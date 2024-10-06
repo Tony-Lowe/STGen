@@ -4,6 +4,16 @@ import cv2
 import json
 from openai import OpenAI
 import re
+from PIL import Image, ImageDraw, ImageFont
+from util import draw_pos,draw_glyph_sp
+
+def get_pos_n_glyph(cx,cy,w,h,angle,text,font_path="./font/Arial_Unicode.ttf"):
+    rect = [(cx,cy),(w,h),angle]
+    box = cv2.boxPoints(rect)
+    box = np.int0(box)
+    positions = draw_pos(box)
+    glyphs = draw_glyph_sp(ImageFont.truetype(font_path,size=60),text,rect,scale=2)
+    return positions,glyphs
 
 def format_cv2_contour(contour):
     epsilon = 0.02 * cv2.arcLength(contour, True)

@@ -1,5 +1,7 @@
 import datetime
 import os
+import random
+import re
 from typing import List, Tuple, Union
 import cv2
 import torch
@@ -9,8 +11,243 @@ import torch.nn as nn
 from sklearn.decomposition import PCA
 from PIL import Image
 import math
-
+import torch.nn.functional as F
+from PIL import Image, ImageDraw, ImageFont
+from t3_dataset import insert_spaces
 from cldm.ctrl import AttentionStore
+
+def draw_glyph_sp(font,text,rect, scale=1, width=512, height=512, add_space=True):
+    cx,cy = rect[0]
+    center = (cx*scale,cy*scale)
+    w, h = rect[1]
+    w*=scale
+    h*=scale
+    angle = -rect[2]
+    img = np.zeros((height*scale, width*scale, 3), np.uint8)
+    img = Image.fromarray(img)
+    # infer font size
+    image4ratio = Image.new("RGB", img.size, "white")
+    draw = ImageDraw.Draw(image4ratio)
+    _, _, _tw, _th = draw.textbbox(xy=(0, 0), text=text, font=font)
+    # print(_tw,_th)
+    text_w = min(w, h) * (_tw / _th)
+    if text_w <= max(w, h):
+        # add space
+        if len(text) > 1 and add_space:
+            for i in range(1, 100):
+                text_space = insert_spaces(text, i)
+                _, _, _tw2, _th2 = draw.textbbox(xy=(0, 0), text=text_space, font=font)
+                if min(w, h) * (_tw2 / _th2) > max(w, h):
+                    break
+            text = insert_spaces(text, i - 1)
+        font_size = min(w, h) * 0.80
+    else:
+        shrink = 0.75
+        font_size = min(w, h) / (text_w / max(w, h)) * shrink
+
+    new_font = font.font_variant(size=int(font_size))
+    left, top, right, bottom = new_font.getbbox(text)
+    text_width = right - left
+    text_height = bottom - top
+    if text_width > img.size[0]:
+        shrink = 0.8
+        font_size = font_size * img.size[0] / text_width * shrink
+        new_font = font.font_variant(size=int(font_size))
+        left, top, right, bottom = new_font.getbbox(text)
+        text_width = right - left
+        text_height = bottom - top
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    draw.text(
+        (img.size[0] // 2 - text_width // 2, img.size[1] // 2  - text_height // 2 - top),
+        text,
+        font=new_font,
+        fill=(255, 255, 255, 255),
+    )
+    rotated_layer = layer.rotate(angle, expand=1)
+    T_t = np.array([[1, 0, img.size[0]/2-center[0]], [0, 1, img.size[1]/2-center[1]], [0, 0, 1]])
+    a,b,c = T_t[0]
+    d,e,f = T_t[1]
+    rotated_layer = rotated_layer.transform(rotated_layer.size,Image.AFFINE, (a,b,c,d,e,f))
+
+    x_offset = int((img.width - rotated_layer.width) / 2)
+    y_offset = int((img.height - rotated_layer.height) / 2)
+    img.paste(rotated_layer, (x_offset, y_offset), rotated_layer)
+    img = np.expand_dims(np.array(img.convert('1')), axis=2).astype(np.float64)
+    return img
+
+
+def draw_pos(ploygon, prob=1.0):
+    img = np.zeros((512, 512, 1))
+    if random.random() < prob:
+        pts = ploygon.reshape((-1, 1, 2))
+        cv2.fillPoly(img, [pts], color=255)
+    # cv2.imshow("image", img)
+    # cv2.waitKey(0)
+    return img / 255.0
+
+
+def sep_mask(pos_imgs, sort_radio="↕"):
+    # print(pos_imgs.max())
+    if pos_imgs.shape[-1] == 3:
+        pos_imgs = cv2.cvtColor(pos_imgs, cv2.COLOR_BGR2GRAY)
+    _, pos_imgs = cv2.threshold(pos_imgs, 254, 255, cv2.THRESH_BINARY)
+    # cv2.imshow('image',pos_imgs)
+    # cv2.waitKey(0)
+    contours, _ = cv2.findContours(pos_imgs, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # print(contours)
+    if sort_radio == "↕":
+        contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[1])
+    else:
+        contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[0])
+    # poly = []
+    # for contour in contours:
+    #     rect = cv2.minAreaRect(contour)
+    #     box = cv2.boxPoints(rect)
+    #     box = np.intp(box)
+    #     poly.append(box)
+    # print(poly)
+    # return poly
+    return contours
+
+
+def count_lines(prompt):
+    prompt = prompt.replace("“", '"')
+    prompt = prompt.replace("”", '"')
+    p = '"(.*?)"'
+    strs = re.findall(p, prompt)
+    if len(strs) == 0:
+        strs = [" "]
+    return len(strs)
+
+
+def get_lines(prompt):
+    prompt = prompt.replace("“", '"')
+    prompt = prompt.replace("”", '"')
+    p = '"(.*?)"'
+    strs = re.findall(p, prompt)
+    if len(strs) == 0:
+        strs = [" "]
+    for strs_idx, strs_item in enumerate(strs):
+        prompt = prompt.replace('"' + strs_item + '"', '"' + f" {PLACE_HOLDER} " + '"')
+    return strs, prompt
+
+
+def check_overlap_polygon(rect_pts1, rect_pts2):
+    poly1 = cv2.convexHull(rect_pts1)
+    poly2 = cv2.convexHull(rect_pts2)
+    rect1 = cv2.boundingRect(poly1)
+    rect2 = cv2.boundingRect(poly2)
+    if (
+        rect1[0] + rect1[2] >= rect2[0]
+        and rect2[0] + rect2[2] >= rect1[0]
+        and rect1[1] + rect1[3] >= rect2[1]
+        and rect2[1] + rect2[3] >= rect1[1]
+    ):
+        return True
+    return False
+
+
+class GaussianSmoothing(torch.nn.Module):
+    """
+    Arguments:
+    Apply gaussian smoothing on a 1d, 2d or 3d tensor. Filtering is performed seperately for each channel in the input
+    using a depthwise convolution.
+        channels (int, sequence): Number of channels of the input tensors. Output will
+            have this number of channels as well.
+        kernel_size (int, sequence): Size of the gaussian kernel. sigma (float, sequence): Standard deviation of the
+        gaussian kernel. dim (int, optional): The number of dimensions of the data.
+            Default value is 2 (spatial).
+    """
+
+    # channels=1, kernel_size=kernel_size, sigma=sigma, dim=2
+    def __init__(
+        self,
+        channels: int = 1,
+        kernel_size: int = 3,
+        sigma: float = 0.5,
+        dim: int = 2,
+    ):
+        super().__init__()
+
+        if isinstance(kernel_size, int):
+            kernel_size = [kernel_size] * dim
+        if isinstance(sigma, float):
+            sigma = [sigma] * dim
+
+        # The gaussian kernel is the product of the
+        # gaussian function of each dimension.
+        kernel = 1
+        meshgrids = torch.meshgrid(
+            [torch.arange(size, dtype=torch.float32) for size in kernel_size]
+        )
+        for size, std, mgrid in zip(kernel_size, sigma, meshgrids):
+            mean = (size - 1) / 2
+            kernel *= (
+                1
+                / (std * math.sqrt(2 * math.pi))
+                * torch.exp(-(((mgrid - mean) / (2 * std)) ** 2))
+            )
+
+        # Make sure sum of values in gaussian kernel equals 1.
+        kernel = kernel / torch.sum(kernel)
+
+        # Reshape to depthwise convolutional weight
+        kernel = kernel.view(1, 1, *kernel.size())
+        kernel = kernel.repeat(channels, *[1] * (kernel.dim() - 1))
+
+        self.register_buffer("weight", kernel)
+        self.groups = channels
+
+        if dim == 1:
+            self.conv = F.conv1d
+        elif dim == 2:
+            self.conv = F.conv2d
+        elif dim == 3:
+            self.conv = F.conv3d
+        else:
+            raise RuntimeError(
+                "Only 1, 2 and 3 dimensions are supported. Received {}.".format(dim)
+            )
+
+    def forward(self, input):
+        """
+        Arguments:
+        Apply gaussian filter to input.
+            input (torch.Tensor): Input to apply gaussian filter on.
+        Returns:
+            filtered (torch.Tensor): Filtered output.
+        """
+        return self.conv(input, weight=self.weight.to(input.dtype), groups=self.groups)
+
+
+smth_3 = GaussianSmoothing(channels=3, sigma=3.0).cuda()
+
+sobel_x = torch.tensor([[1, 0, -1], [2, 0, -2], [1, 0, -1]], dtype=torch.float32).cuda()
+
+sobel_y = torch.tensor([[1, 2, 1], [0, 0, 0], [-1, -2, -1]], dtype=torch.float32).cuda()
+
+sobel_x = sobel_x.view(1, 1, 3, 3).expand(1, 3, 3, 3)
+sobel_y = sobel_y.view(1, 1, 3, 3).expand(1, 3, 3, 3)
+
+sobel_conv_x = nn.Conv2d(3, 3, kernel_size=3, stride=1, padding=1, bias=False)
+sobel_conv_y = nn.Conv2d(3, 3, kernel_size=3, stride=1, padding=1, bias=False)
+
+
+sobel_conv_x.weight = nn.Parameter(sobel_x)
+sobel_conv_y.weight = nn.Parameter(sobel_y)
+
+
+def get_edge(attn_map):
+    attn_map_clone = attn_map
+    attn_map_clone = attn_map_clone / attn_map_clone.max().detach()
+    attn_map_clone = F.pad(attn_map_clone, (1, 1, 1, 1), mode="reflect")
+    attn_map_clone = smth_3(attn_map_clone)
+
+    sobel_output_x = sobel_conv_x(attn_map_clone).squeeze()
+    sobel_output_y = sobel_conv_y(attn_map_clone).squeeze()
+    sobel_sum = torch.sqrt(sobel_output_y**2 + sobel_output_x**2)
+    return sobel_sum
 
 
 def save_images(img_list, folder):
@@ -60,14 +297,18 @@ def arr2tensor(arr, bs):
     return _arr
 
 
-def pca_compute(attn_map, img_size=512):
-    attn_map = attn_map.permute(2, 0, 1).unsqueeze(0)
+def pca_compute(attn_map, img_size=512,n_c=3):
+    attn_map = attn_map.unsqueeze(0)
+    # print(attn_map.shape)
     attn_map = nn.Upsample(size=(img_size, img_size), mode="bilinear")(attn_map)
     attn_map = attn_map.squeeze(0).permute(1, 2, 0)
+    # print("after upsample", attn_map.shape)
     attn_map = attn_map.reshape(-1, attn_map.shape[-1]).cpu().numpy()
-    pca = PCA(n_components=3)
+    # print("before_pca", attn_map.shape)
+    pca = PCA(n_components=n_c)
     pca.fit(attn_map)
     attn_map_pca = pca.transform(attn_map)  # N X 3
+    # print("after pca", attn_map_pca.shape)
     h = w = int(math.sqrt(attn_map_pca.shape[0]))
     attn_map_pca = attn_map_pca.reshape(h, w, -1)
     attn_map_pca = (attn_map_pca - attn_map_pca.min(axis=(0, 1))) / (
@@ -204,3 +445,16 @@ def view_images(
 
     pil_img = Image.fromarray(image_)
     return pil_img
+
+PLACE_HOLDER = "*"
+
+def get_lines(prompt):
+    prompt = prompt.replace("“", '"')
+    prompt = prompt.replace("”", '"')
+    p = '"(.*?)"'
+    strs = re.findall(p, prompt)
+    if len(strs) == 0:
+        strs = [" "]
+    for strs_idx, strs_item in enumerate(strs):
+        prompt = prompt.replace('"' + strs_item + '"', '"' + f" {PLACE_HOLDER} " + '"')
+    return strs, prompt

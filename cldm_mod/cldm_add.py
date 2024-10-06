@@ -37,7 +37,7 @@ from ldm.modules.diffusionmodules.util import (
     normalization,
     checkpoint,
 )
-from util import show_ca, aggregate_attention
+from util import pca_compute, show_ca, aggregate_attention
 
 try:
     import xformers
@@ -642,6 +642,7 @@ class ControlNet_masa(ControlNet):
         )
         self.middle_block_out = self.make_zero_conv(ch)
         self._feature_size += ch
+
 
     def forward(self, x, hint, text_info, timesteps, context,**kwargs):
         """

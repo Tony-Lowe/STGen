@@ -255,7 +255,7 @@ def draw_pos(ploygon, prob=1.0):
 
 def inference(input_data, **params):
     ddim_sampler = myDDIMSampler(
-        model,start_step=params["start_op_step"],end_step=params["end_op_step"], max_op_step=params["OPTIMIZE_STEPS"],loss_alpha=params["alpha"],loss_beta=params["beta"]
+        model,start_step=params["start_op_step"],end_step=params["end_op_step"], max_op_step=params["OPTIMIZE_STEPS"],loss_alpha=params["alpha"],loss_beta=params["beta"],add_theta=params["theta"]
     )
 
     (
@@ -357,6 +357,7 @@ def inference(input_data, **params):
             text_info=info,
         )
     )
+    # info["holder_idx"] = model.cond_stage_model.get_index() # [batch_size, 77], bool
     un_cond = model.get_learned_conditioning(
         dict(
             c_concat=[hint],
@@ -410,21 +411,21 @@ def inference(input_data, **params):
     now = datetime.datetime.now()
     date_str = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%H_%M_%S")
-    for idx, x_inter in enumerate(intermediates["x_inter"]):
-        # print(idx)
-        # x_inter = model.decode_first_stage(x_inter)
-        # x_inter = (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
-        decode_x0 = model.decode_first_stage(intermediates["pred_x0_other"][idx])
-        decode_x0 = torch.clamp(decode_x0, -1, 1)
-        decode_x0 = (decode_x0 + 1.0) / 2.0 * 255  # -1,1 -> 0,255; n, c,h,w
-        decode_x0 = einops.rearrange(decode_x0, "b c h w -> b h w c").cpu().numpy().clip(0, 255).astype(np.uint8)
-        # if not os.path.exists(os.path.join(img_save_folder,"inter")):
-        #     os.makedirs(os.path.join(img_save_folder, "inter"))
-        # cv2.imwrite(os.path.join(img_save_folder, "inter",f"{idx}.png"), x_inter[0])
-        save_with_para = os.path.join(img_save_folder,f"""{params["step_size"]}_alpha_{params["alpha"]}_beta_{params["beta"]}_{int(params["start_op_step"])}->{int(params["end_op_step"])}_{int(params["OPTIMIZE_STEPS"])}""",date_str)
-        if not os.path.exists(os.path.join(save_with_para, "inter_other")):
-            os.makedirs(os.path.join(save_with_para, "inter_other"))
-        cv2.imwrite(os.path.join(save_with_para, "inter_other",f"{time_str}_{idx}.png"), decode_x0[0])
+    # for idx, x_inter in enumerate(intermediates["x_inter"]):
+    #     # print(idx)
+    #     # x_inter = model.decode_first_stage(x_inter)
+    #     # x_inter = (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
+    #     decode_x0 = model.decode_first_stage(intermediates["pred_x0_other"][idx])
+    #     decode_x0 = torch.clamp(decode_x0, -1, 1)
+    #     decode_x0 = (decode_x0 + 1.0) / 2.0 * 255  # -1,1 -> 0,255; n, c,h,w
+    #     decode_x0 = einops.rearrange(decode_x0, "b c h w -> b h w c").cpu().numpy().clip(0, 255).astype(np.uint8)
+    #     # if not os.path.exists(os.path.join(img_save_folder,"inter")):
+    #     #     os.makedirs(os.path.join(img_save_folder, "inter"))
+    #     # cv2.imwrite(os.path.join(img_save_folder, "inter",f"{idx}.png"), x_inter[0])
+    #     save_with_para = os.path.join(img_save_folder,f"""{params["step_size"]}_alpha_{params["alpha"]}_beta_{params["beta"]}_theta_{params["theta"]}_{int(params["start_op_step"])}->{int(params["end_op_step"])}_{int(params["OPTIMIZE_STEPS"])}""",date_str)
+    #     if not os.path.exists(os.path.join(save_with_para, "inter_other")):
+    #         os.makedirs(os.path.join(save_with_para, "inter_other"))
+    #     cv2.imwrite(os.path.join(save_with_para, "inter_other",f"{time_str}_{idx}.png"), decode_x0[0])
 
     results = [x_samples[i] for i in range(batch_size)]
     x_samples_other = model.decode_first_stage(sampels_other)
@@ -467,6 +468,7 @@ def process(
     end_op_step,
     loss_alpha,
     loss_beta,
+    add_theta,
     *rect_list,
     angle=0,
 ):
@@ -553,6 +555,7 @@ def process(
         "OPTIMIZE_STEPS":int(op_steps),
         "alpha":loss_alpha,
         "beta":loss_beta,
+        "theta":add_theta,
     }
     input_data = {
         "prompt": prompt,
@@ -564,7 +567,7 @@ def process(
     results = inference(input_data, **params)
     time = results.pop()
     # if rtn_code >= 0:
-    save_with_para = os.path.join(img_save_folder,f"{step_size}_alpha_{loss_alpha}_beta_{loss_beta}_{int(start_op_step)}->{int(end_op_step)}_{int(op_steps)}")
+    save_with_para = os.path.join(img_save_folder,f"{step_size}_alpha_{loss_alpha}_beta_{loss_beta}_theta_{add_theta}_{int(start_op_step)}->{int(end_op_step)}_{int(op_steps)}")
     save_images(results, save_with_para)
     print(f"Done, result images are saved in: {save_with_para}")
     #     if rtn_warning:
@@ -801,15 +804,16 @@ with block:
 
             with gr.Accordion("🛠Optimization Parameters(优化参数)", open=False):
                 with gr.Row(variant="compact"):
-                    step_size = gr.Number(label="Step Size(优化步长)", value=0.1)
-                    lamd = gr.Number(label="Lambda(loss系数)",value=1)
-                    op_step = gr.Number(label="Optimize Steps(优化步数)", value=20)
+                    step_size = gr.Number(label="Step Size(优化步长)", value=0)
+                    lamd = gr.Number(label="Lambda(loss系数)",value=0)
+                    op_step = gr.Number(label="Optimize Steps(优化步数)", value=1)
                 with gr.Row(variant="compact"):
                     start_op_step = gr.Number(label="Start Optimize Step(结束优化的inference步数)", value=0)
                     end_op_step = gr.Number(label="End Optimize Step(结束优化的inference步数)", value=10)
                 with gr.Row(variant="compact"):
                     loss_alpha = gr.Number(label="Alpha(Ocr Loss系数)", value=0)
-                    loss_beta = gr.Number(label="Beta(MSE Loss 系数)", value=100)
+                    loss_beta = gr.Number(label="Beta(MSE Loss 系数)", value=10)
+                    add_theta = gr.Number(label="Theta(Add glyph 系数)", value=0)
 
             prompt = gr.Textbox(label="Prompt(提示词)")
             with gr.Tabs() as tab_modes:
@@ -996,7 +1000,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    1,
+                                    4,
                                     33789703,
                                 ],
                                 [
@@ -1005,7 +1009,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    1,
+                                    4,
                                     35621187,
                                 ],
                                 [
@@ -1014,7 +1018,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    1,
+                                    4,
                                     2563689,
                                 ],
                                 [
@@ -1023,7 +1027,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    1,
+                                    4,
                                     88952132,
                                 ],
                                 [
@@ -1032,7 +1036,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    1,
+                                    4,
                                     66273235,
                                 ],
                                 [
@@ -1041,7 +1045,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    1,
+                                    4,
                                     35107824,
                                 ],
                                 [
@@ -1050,7 +1054,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     True,
-                                    1,
+                                    4,
                                     13246309,
                                 ],
                                 [
@@ -1059,7 +1063,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    1,
+                                    4,
                                     93424638,
                                 ],
                                 [
@@ -1068,7 +1072,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    1,
+                                    4,
                                     83866922,
                                 ],
                                 [
@@ -1077,7 +1081,7 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     True,
-                                    1,
+                                    4,
                                     64901362,
                                 ],
                             ],
@@ -1377,6 +1381,7 @@ with block:
         end_op_step,
         loss_alpha,
         loss_beta,
+        add_theta,
         *(rect_cb_list + rect_xywh_list),
     ]
     run_gen.click(

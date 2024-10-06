@@ -19,7 +19,7 @@ model:
     scale_factor: 0.18215
     use_ema: False
     only_mid_control: False
-    loss_alpha: 0  # perceptual loss, 0.003
+    loss_alpha: 1  # perceptual loss, 0.003
     loss_beta: 0  # ctc loss
     latin_weight: 1.0  # latin text line may need smaller weigth
     with_step_weight: true
@@ -70,7 +70,7 @@ model:
         context_dim: 768
         use_checkpoint: True
         legacy: False
-        start_step: 51
+        start_step: 10
         start_layer: 10
 
     first_stage_config:

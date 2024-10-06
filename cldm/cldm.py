@@ -56,6 +56,7 @@ class ControlledUnetModel(UNetModel):
             else:
                 h = torch.cat([h, hs.pop() + control.pop()], dim=1)
             h = module(h, emb, context)
+            # print(i,":",h.shape)
 
         h = h.type(x.dtype)
         return self.out(h)

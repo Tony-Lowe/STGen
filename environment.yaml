@@ -45,3 +45,6 @@ dependencies:
       - fsspec
       - diffusers==0.10.2
       - ujson
+      - tqdm
+      - openai
+      - scikit-learn

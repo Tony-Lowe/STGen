@@ -1,3 +1,4 @@
+import math
 import cv2
 from einops import rearrange
 import numpy as np
@@ -15,7 +16,7 @@ from util import get_edge
 
 class myDDIMSampler(DDIMSampler):
 
-    def __init__(self, model, schedule="linear",start_step=7, end_step=20, max_op_step=5,loss_alpha=0,loss_beta=0,add_theta=0.35, **kwargs):
+    def __init__(self, model, schedule="linear",start_step=7, end_step=20, max_op_step=5,loss_alpha=0,loss_beta=0,add_theta=0.35,view_batch_size=1, **kwargs):
         super().__init__(model, schedule, **kwargs)
         self.start_step = start_step
         self.end_step = end_step
@@ -24,7 +25,8 @@ class myDDIMSampler(DDIMSampler):
         self.add_theta = add_theta
         self.max_op_step = max_op_step
         self.sample_size = 64
-        self.set_view_config()
+        self.vae_scale_factor = 8  # 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.view_batch_size = view_batch_size
         self.model.zero_grad()
 
     def sample(
@@ -181,24 +183,29 @@ class myDDIMSampler(DDIMSampler):
                 if ucg_schedule is not None:
                     assert len(ucg_schedule) == len(time_range)
                     unconditional_guidance_scale = ucg_schedule[i]
-
-            outs = self.p_sample_ddim(
-                img,
-                cond,
-                ts,
-                index=index,
-                use_original_steps=ddim_use_original_steps,
-                quantize_denoised=quantize_denoised,
-                temperature=temperature,
-                noise_dropout=noise_dropout,
-                score_corrector=score_corrector,
-                corrector_kwargs=corrector_kwargs,
-                unconditional_guidance_scale=unconditional_guidance_scale,
-                unconditional_conditioning=unconditional_conditioning,
-                dynamic_threshold=dynamic_threshold,
-                total_steps=total_steps,
-            )
-            with torch.no_grad():
+                cond["text_info"]["cur_step"] = i
+                if (total_steps - index - 1 <= self.end_step and total_steps - index - 1 >= self.start_step):
+                    max_op_step = self.max_op_step
+                    for op_step in range(max_op_step):
+                        torch.cuda.empty_cache()
+                        img = self.add_glyph(img, cond)
+                        torch.cuda.empty_cache()
+                outs = self.p_sample_ddim(
+                    img,
+                    cond,
+                    ts,
+                    index=index,
+                    use_original_steps=ddim_use_original_steps,
+                    quantize_denoised=quantize_denoised,
+                    temperature=temperature,
+                    noise_dropout=noise_dropout,
+                    score_corrector=score_corrector,
+                    corrector_kwargs=corrector_kwargs,
+                    unconditional_guidance_scale=unconditional_guidance_scale,
+                    unconditional_conditioning=unconditional_conditioning,
+                    dynamic_threshold=dynamic_threshold,
+                    total_steps=total_steps,
+                )
                 img, pred_x0,img_other,pred_x0_other = outs
                 if callback:
                     callback(i)
@@ -246,12 +253,12 @@ class myDDIMSampler(DDIMSampler):
 
         # %-----------------------------------------------------------------------------------------%
         # TODO: writing Test Time Augmentation
-        if (total_steps - index - 1 <= self.end_step and total_steps - index - 1 >= self.start_step):
-            max_op_step = self.max_op_step
-            for op_step in range(max_op_step):
-                torch.cuda.empty_cache()
-                x = self.add_glyph(x,c)
-                torch.cuda.empty_cache()
+        # if (total_steps - index - 1 <= self.end_step and total_steps - index - 1 >= self.start_step):
+        #     max_op_step = self.max_op_step
+        #     for op_step in range(max_op_step):
+        #         torch.cuda.empty_cache()
+        #         x = self.add_glyph(x,c)
+        #         torch.cuda.empty_cache()
         with torch.no_grad():
             if unconditional_conditioning is None or unconditional_guidance_scale == 1.0:
                 model_output = self.model.apply_model(x, t, c) # c is a dict!!!
@@ -327,23 +334,45 @@ class myDDIMSampler(DDIMSampler):
     def add_glyph(self,x_tar,c):
         cur_step = c["text_info"]["cur_step"]
         bsz = x_tar.shape[0]
-        print(10**(-cur_step) * self.add_theta)
         for i in range(bsz):
             n_lines = c["text_info"]["n_lines"][i]
             for j in range(n_lines):
                 glyph_img = F.interpolate(c["text_info"]["glyphs"][j][i].unsqueeze(0),(512,512)).detach()
                 glyph_img = torch.cat([glyph_img,glyph_img,glyph_img],dim=1)
+                # print(angle)
+                # print(10**(-cur_step) * self.add_theta * 0.25*angle/45)
                 # glyph_edge = get_edge(glyph_img)
                 # # print(glyph_edge.shape)
                 # glyph_img = glyph_img*(1 - self.loss_beta)+glyph_edge*self.loss_beta
-                x_tar[i] = x_tar[i] + 10**(-cur_step) * self.add_theta * F.interpolate(c["text_info"]["positions"][j][i].unsqueeze(0).detach(),(64,64))*self.model.get_first_stage_encoding(self.model.encode_first_stage(self.loss_alpha * glyph_img))
+                mask = F.interpolate(c["text_info"]["positions"][j][i].unsqueeze(0).detach(),(64,64))
+                mask = mask.squeeze(0).permute(1,2,0).cpu().numpy()
+                rect_mask = np.zeros(mask.shape)
+                # print(mask.shape)
+                contours,_ = cv2.findContours((mask*255).astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+                if len(contours)==0:
+                    rect_mask = mask
+                else:
+                    rect = cv2.minAreaRect(contours[0])
+                    box = cv2.boxPoints(rect)
+                    box = np.int0(box)
+                    cv2.fillPoly(rect_mask,[box],[1])
+                # cv2.imshow("mask",rect_mask)
+                # cv2.waitKey(0)
+                rect_mask = torch.tensor(rect_mask).permute(2,0,1).unsqueeze(0).float().cuda()
+                theta = 10 ** (-cur_step) * self.add_theta 
+                glyph_latent = self.model.get_first_stage_encoding(self.model.encode_first_stage(self.loss_alpha * glyph_img))
+                valid_pixel= rect_mask.sum()
+                x_mean = (x_tar[i]*rect_mask).sum(dim=(-2,-1))/valid_pixel
+                x_std = ((x_tar[i]*rect_mask).pow(2).sum(dim=(-2,-1)) / valid_pixel - x_mean.pow(2)).sqrt()
+                x_mean = x_mean.unsqueeze(-1).unsqueeze(-1)
+                x_std = x_std.unsqueeze(-1).unsqueeze(-1)
+                g_mean = (glyph_latent * rect_mask).sum(dim=(-2, -1)) / valid_pixel
+                g_std = ((glyph_latent*rect_mask).pow(2).sum(dim=(-2,-1)) / valid_pixel - g_mean.pow(2)).sqrt()
+                g_mean = g_mean.unsqueeze(-1).unsqueeze(-1)
+                g_std = g_std.unsqueeze(-1).unsqueeze(-1)
+                # print((rect_mask * ((glyph_latent - g_mean) / g_std * x_std + x_mean)).shape)
+                x_tar[i] = x_tar[i]*(1-rect_mask) + theta * rect_mask * ((glyph_latent-g_mean)/g_std * x_std + x_mean)
         return x_tar
-
-    def set_view_config(self, patch_size=None):
-        self.view_config = {
-            "window_size": patch_size if patch_size is not None else self.sample_size // 2,
-            "stride": patch_size if patch_size is not None else self.sample_size // 2}
-        self.view_config["context_size"] = self.sample_size - self.view_config["window_size"]
 
     def apply_model(self, x_noisy, t, cond, *args, **kwargs):
         assert isinstance(cond, dict)

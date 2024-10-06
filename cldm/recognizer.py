@@ -60,11 +60,11 @@ def adjust_image(box, img):
     return result
 
 
-'''
-mask: numpy.ndarray, mask of textual, HWC
-src_img: torch.Tensor, source image, CHW
-'''
 def crop_image(src_img, mask):
+    '''
+    mask: numpy.ndarray, mask of textual, HWC
+    src_img: torch.Tensor, source image, CHW
+    '''
     box = min_bounding_rect(mask)
     result = adjust_image(box, src_img)
     if len(result.shape) == 2:

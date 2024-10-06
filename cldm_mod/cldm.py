@@ -1,13 +1,15 @@
 import cv2
 from einops import rearrange
+from matplotlib.mathtext import get_unicode_index
 from networkx import read_adjlist
+import torchvision.transforms.functional as TF
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from functools import partial
 
-from cldm.cldm import ControlLDM
+from cldm.cldm import ControlLDM,ControlNet
 from ldm.models import diffusion
 from ldm.modules.diffusionmodules.util import (
     make_beta_schedule,
@@ -28,6 +30,46 @@ from ldm.util import (
 )
 from util import pca_compute
 
+class MyControlNet(ControlNet):
+    def forward(self, x, hint, text_info, timesteps, context, **kwargs):
+        """
+        context is conditioning for the model
+        """
+        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
+        if self.use_fp16:
+            t_emb = t_emb.half()
+        emb = self.time_embed(t_emb)
+
+        # guided_hint from text_info
+        B, C, H, W = x.shape
+        glyphs = torch.cat(text_info["glyphs"], dim=1).sum(dim=1, keepdim=True)
+        positions = torch.cat(text_info["positions"], dim=1).sum(dim=1, keepdim=True)
+        enc_glyph = self.glyph_block(glyphs, emb, context)
+        enc_pos = self.position_block(positions, emb, context)
+        guided_hint = self.fuse_block(
+            torch.cat([enc_glyph, enc_pos, text_info["masked_x"]], dim=1)
+        )  # 4,320,64,64
+        guided_hint_out = guided_hint
+        outs = []
+
+        h = x.type(self.dtype)
+        for module, zero_conv in zip(self.input_blocks, self.zero_convs):
+            # if isinstance(module, TimestepEmbedSequential):
+            #     for n,m in module.named_modules():
+            #         if "attn1" in n.split(".")[-1]:
+            #             print(m.query_dim)
+            if guided_hint is not None:
+                h = module(h, emb, context)  # shape batchsize, 320, 64, 64
+                h += guided_hint  # Auxiliary Latent plus Latent
+                guided_hint = None
+            else:
+                h = module(h, emb, context)
+            outs.append(zero_conv(h, emb, context))
+
+        h = self.middle_block(h, emb, context)
+        outs.append(self.middle_block_out(h, emb, context))
+
+        return outs,guided_hint_out
 class MyControlLDM(ControlLDM):
     def __init__(self, control_stage_config, control_key, glyph_key, position_key, only_mid_control, loss_alpha=0, loss_beta=0, with_step_weight=False, use_vae_upsample=False, latin_weight=1, embedding_manager_config=None, *args, **kwargs):
         super().__init__(control_stage_config, control_key, glyph_key, position_key, only_mid_control, loss_alpha, loss_beta, with_step_weight, use_vae_upsample, latin_weight, embedding_manager_config, *args, **kwargs)
@@ -67,6 +109,15 @@ class MyControlLDM(ControlLDM):
             hint=_hint,
             text_info=cond["text_info"],
         )  # cldm.cldm.ControlNet
+        # for i, module in enumerate(diffusion_model.output_blocks):
+        #     if i == 11:
+        #         guide_hint = module(guide_hint, diffusion_model.time_embed(t), _cond)
+        # guide_hint_for_show = diffusion_model.out(guide_hint)
+        # guide_hint_for_show = pca_compute(guide_hint[0])
+        # guide_hint_for_show = TF.pil_to_tensor(guide_hint_for_show).unsqueeze(0).to(self.device)
+        # guide_hint_for_show = self.decode_first_stage(guide_hint_for_show)
+        # guide_hint_for_show = TF.to_pil_image(guide_hint_for_show[0])
+        # guide_hint_for_show.save(f"z_a.png")
         # control_for_show = control[-1][0]
         # control_for_show = pca_compute(control_for_show)
         # control_for_show.save(f"Result/{t[0]}.png")
