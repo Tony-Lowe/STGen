@@ -458,3 +458,16 @@ def get_lines(prompt):
     for strs_idx, strs_item in enumerate(strs):
         prompt = prompt.replace('"' + strs_item + '"', '"' + f" {PLACE_HOLDER} " + '"')
     return strs, prompt
+
+def AdaINnorm(x_tar, glyph_latent, rect_mask):
+    valid_pixel = rect_mask.sum()
+    x_mean = (x_tar * rect_mask).sum(dim=(-2,-1))/valid_pixel
+    x_std = ((x_tar * rect_mask).pow(2).sum(dim=(-2,-1)) / valid_pixel - x_mean.pow(2)).sqrt()
+    x_mean = x_mean.unsqueeze(-1).unsqueeze(-1)
+    x_std = x_std.unsqueeze(-1).unsqueeze(-1)
+    g_mean = (glyph_latent * rect_mask).sum(dim=(-2, -1)) / valid_pixel
+    g_std = ((glyph_latent * rect_mask).pow(2).sum(dim=(-2,-1)) / valid_pixel - g_mean.pow(2)).sqrt()
+    g_mean = g_mean.unsqueeze(-1).unsqueeze(-1)
+    g_std = g_std.unsqueeze(-1).unsqueeze(-1)
+    glyph_latent = (glyph_latent - g_mean) / g_std * x_std + x_mean
+    return glyph_latent

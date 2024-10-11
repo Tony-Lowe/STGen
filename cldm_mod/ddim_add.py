@@ -11,7 +11,7 @@ from tqdm import tqdm
 from cldm.ddim_hacked import DDIMSampler
 from cldm.recognizer import crop_image
 from ldm.modules.diffusionmodules.util import noise_like, extract_into_tensor
-from util import get_edge
+from util import AdaINnorm, get_edge
 
 
 class myDDIMSampler(DDIMSampler):
@@ -339,11 +339,6 @@ class myDDIMSampler(DDIMSampler):
             for j in range(n_lines):
                 glyph_img = F.interpolate(c["text_info"]["glyphs"][j][i].unsqueeze(0),(512,512)).detach()
                 glyph_img = torch.cat([glyph_img,glyph_img,glyph_img],dim=1)
-                # print(angle)
-                # print(10**(-cur_step) * self.add_theta * 0.25*angle/45)
-                # glyph_edge = get_edge(glyph_img)
-                # # print(glyph_edge.shape)
-                # glyph_img = glyph_img*(1 - self.loss_beta)+glyph_edge*self.loss_beta
                 mask = F.interpolate(c["text_info"]["positions"][j][i].unsqueeze(0).detach(),(64,64))
                 mask = mask.squeeze(0).permute(1,2,0).cpu().numpy()
                 rect_mask = np.zeros(mask.shape)
@@ -360,18 +355,13 @@ class myDDIMSampler(DDIMSampler):
                 # cv2.waitKey(0)
                 rect_mask = torch.tensor(rect_mask).permute(2,0,1).unsqueeze(0).float().cuda()
                 theta = 10 ** (-cur_step) * self.add_theta 
-                glyph_latent = self.model.get_first_stage_encoding(self.model.encode_first_stage(self.loss_alpha * glyph_img))
-                valid_pixel= rect_mask.sum()
-                x_mean = (x_tar[i]*rect_mask).sum(dim=(-2,-1))/valid_pixel
-                x_std = ((x_tar[i]*rect_mask).pow(2).sum(dim=(-2,-1)) / valid_pixel - x_mean.pow(2)).sqrt()
-                x_mean = x_mean.unsqueeze(-1).unsqueeze(-1)
-                x_std = x_std.unsqueeze(-1).unsqueeze(-1)
-                g_mean = (glyph_latent * rect_mask).sum(dim=(-2, -1)) / valid_pixel
-                g_std = ((glyph_latent*rect_mask).pow(2).sum(dim=(-2,-1)) / valid_pixel - g_mean.pow(2)).sqrt()
-                g_mean = g_mean.unsqueeze(-1).unsqueeze(-1)
-                g_std = g_std.unsqueeze(-1).unsqueeze(-1)
-                # print((rect_mask * ((glyph_latent - g_mean) / g_std * x_std + x_mean)).shape)
-                x_tar[i] = x_tar[i]*(1-rect_mask) + theta * rect_mask * ((glyph_latent-g_mean)/g_std * x_std + x_mean)
+                glyph_latent = self.model.get_first_stage_encoding(self.model.encode_first_stage(glyph_img))
+                # %--------------------------------------------------------------------------------------------%
+                # AdaIN
+                glyph_latent = AdaINnorm(x_tar[i],glyph_latent, rect_mask)
+                # %--------------------------------------------------------------------------------------------%
+                x_tar[i] = x_tar[i]*(1-rect_mask) + theta * rect_mask * glyph_latent
+                # x_tar[i] = x_tar[i] + theta * rect_mask * glyph_latent
         return x_tar
 
     def apply_model(self, x_noisy, t, cond, *args, **kwargs):

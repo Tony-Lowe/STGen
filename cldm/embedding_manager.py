@@ -1,6 +1,8 @@
 '''
 Copyright (c) Alibaba, Inc. and its affiliates.
 '''
+from curses import has_key
+from attr import has
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -113,8 +115,14 @@ class EmbeddingManager(nn.Module):
         self.placeholder_token = get_token_for_string(placeholder_string)
 
     def encode_text(self, text_info):
-        self.times = text_info["times"]
-        self.times1 = text_info["times1"]
+        if 'times' in text_info:
+            self.times = text_info["times"]
+        else:
+            self.times = 1
+        if 'times1' in text_info:
+            self.times1 = text_info["times1"]
+        else:
+            self.times1 = 1
         if self.get_recog_emb is None and self.emb_type == 'ocr':
             self.get_recog_emb = partial(get_recog_emb, self.recog)
 

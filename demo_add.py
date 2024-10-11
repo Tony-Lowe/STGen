@@ -83,7 +83,7 @@ def parse_args():
     parser.add_argument(
         "--save_path",
         type=str,
-        default="Result/masa",
+        default="Result/add",
         help="load a specified anytext checkpoint",
     )
     args = parser.parse_args()
@@ -254,7 +254,7 @@ def inference(input_data, **params):
         gly_line = draw_glyph(font, text)
         glyphs, angle, center = draw_glyph3(ImageFont.truetype(params["Font_path"],size=60), text, polygons[idx], scale=2)
         info["angles"] += [angle]
-        save_with_para = os.path.join(img_save_folder,f"""alpha_{params["alpha"]}_beta_{params["beta"]}_theta_{params["theta"]}_{int(params["start_op_step"])}->{int(params["end_op_step"])}_{int(params["OPTIMIZE_STEPS"])}""",date_str)
+        save_with_para = os.path.join(params["save_path"], date_str)
         if not os.path.exists(os.path.join(save_with_para, "glyph")):
             os.makedirs(os.path.join(save_with_para, "glyph"))
         cv2.imwrite(os.path.join(save_with_para, "glyph",f"{time_str}_{idx}.png"), glyphs*255)
@@ -319,20 +319,6 @@ def inference(input_data, **params):
         unconditional_conditioning=un_cond,
     )
 
-    # for idx, x_inter in enumerate(intermediates["x_inter"]):
-    #     # print(idx)
-    #     x_inter = model.decode_first_stage(x_inter)
-    #     x_inter = (
-    #     (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5)
-    #     .cpu()
-    #     .numpy()
-    #     .clip(0, 255)
-    #     .astype(np.uint8)
-    #     )
-    #     if not os.path.exists(os.path.join(img_save_folder,"inter")):
-    #         os.makedirs(os.path.join(img_save_folder, "inter"))
-    #     cv2.imwrite(os.path.join(img_save_folder, "inter",f"{idx}.png"), x_inter[0])
-
     cost = (time.time() - tic) * 1000.0
     if save_memory:
         model.low_vram_shift(is_diffusing=False)
@@ -348,21 +334,21 @@ def inference(input_data, **params):
     now = datetime.datetime.now()
     date_str = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%H_%M_%S")
-    for idx, x_inter in enumerate(intermediates["x_inter"]):
-        # print(idx)
-        # x_inter = model.decode_first_stage(x_inter)
-        # x_inter = (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
-        decode_x0 = model.decode_first_stage(intermediates["pred_x0_other"][idx])
-        decode_x0 = torch.clamp(decode_x0, -1, 1)
-        decode_x0 = (decode_x0 + 1.0) / 2.0 * 255  # -1,1 -> 0,255; n, c,h,w
-        decode_x0 = einops.rearrange(decode_x0, "b c h w -> b h w c").cpu().numpy().clip(0, 255).astype(np.uint8)
-        # if not os.path.exists(os.path.join(img_save_folder,"inter")):
-        #     os.makedirs(os.path.join(img_save_folder, "inter"))
-        # cv2.imwrite(os.path.join(img_save_folder, "inter",f"{idx}.png"), x_inter[0])
-        save_with_para = os.path.join(img_save_folder,f"""alpha_{params["alpha"]}_beta_{params["beta"]}_theta_{params["theta"]}_{int(params["start_op_step"])}->{int(params["end_op_step"])}_{int(params["OPTIMIZE_STEPS"])}""",date_str)
-        if not os.path.exists(os.path.join(save_with_para, "inter_other")):
-            os.makedirs(os.path.join(save_with_para, "inter_other"))
-        cv2.imwrite(os.path.join(save_with_para, "inter_other",f"{time_str}_{idx}.png"), decode_x0[0])
+    # for idx, x_inter in enumerate(intermediates["x_inter"]):
+    #     # print(idx)
+    #     # x_inter = model.decode_first_stage(x_inter)
+    #     # x_inter = (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
+    #     decode_x0 = model.decode_first_stage(intermediates["pred_x0_other"][idx])
+    #     decode_x0 = torch.clamp(decode_x0, -1, 1)
+    #     decode_x0 = (decode_x0 + 1.0) / 2.0 * 255  # -1,1 -> 0,255; n, c,h,w
+    #     decode_x0 = einops.rearrange(decode_x0, "b c h w -> b h w c").cpu().numpy().clip(0, 255).astype(np.uint8)
+    #     # if not os.path.exists(os.path.join(img_save_folder,"inter")):
+    #     #     os.makedirs(os.path.join(img_save_folder, "inter"))
+    #     # cv2.imwrite(os.path.join(img_save_folder, "inter",f"{idx}.png"), x_inter[0])
+    #     save_with_para = os.path.join(params["save_path"], date_str)
+    #     if not os.path.exists(os.path.join(save_with_para, "inter_other")):
+    #         os.makedirs(os.path.join(save_with_para, "inter_other"))
+    #     cv2.imwrite(os.path.join(save_with_para, "inter_other",f"{time_str}_{idx}.png"), decode_x0[0])
 
     results = [x_samples[i] for i in range(batch_size)]
     x_samples_other = model.decode_first_stage(sampels_other)
@@ -468,6 +454,7 @@ def process(
     # rotMat = cv2.getRotationMatrix2D(center, angle, 1.0)
     # rot_pos_imgs = cv2.warpAffine(pos_imgs,rotMat,pos_imgs.shape[1:-1])
     # print(times)
+    save_with_para = os.path.join(img_save_folder,f"theta_{add_theta}_{int(start_op_step)}->{int(end_op_step)}")
     params = {
         "mode": mode,
         "sort_priority": sort_radio,
@@ -495,6 +482,7 @@ def process(
         "beta": loss_beta,
         "theta": add_theta,
         "Font_path": font_path,
+        "save_path": save_with_para,
     }
     input_data = {
         "prompt": prompt,
@@ -506,7 +494,6 @@ def process(
     results = inference(input_data, **params)
     time = results.pop()
     # if rtn_code >= 0:
-    save_with_para = os.path.join(img_save_folder,f"alpha_{loss_alpha}_beta_{loss_beta}_theta_{add_theta}_{int(start_op_step)}->{int(end_op_step)}_{int(op_steps)}")
     save_images(results, save_with_para)
     print(f"Done, result images are saved in: {save_with_para}")
     #     if rtn_warning:
