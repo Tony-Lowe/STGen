@@ -1,6 +1,8 @@
+from cmath import rect
 import cv2
 import math
 from einops import rearrange
+from matplotlib.pylab import cond
 import numpy as np
 import torch
 import torch.nn as nn
@@ -12,6 +14,8 @@ from cldm.ddim_hacked import DDIMSampler
 from cldm.recognizer import crop_image,min_bounding_rect
 from ldm.modules.diffusionmodules.util import noise_like, extract_into_tensor
 from skimage.transform._geometric import _umeyama as get_sym_mat
+
+from util import AdaINnorm
 
 
 class GaussianSmoothing(torch.nn.Module):
@@ -129,7 +133,7 @@ def edge_loss(attn_map): # , mask, iou):
 
 class myDDIMSampler(DDIMSampler):
 
-    def __init__(self, model, schedule="linear",start_step=7, end_step=20, max_op_step=5,loss_alpha=0,loss_beta=0,add_theta=0.03, **kwargs):
+    def __init__(self, model, schedule="linear",start_step=7, end_step=20, max_op_step=5,loss_alpha=0,loss_beta=0,add_theta=0.75,add_omega=0.3,ref_lat=None, **kwargs):
         super().__init__(model, schedule, **kwargs)
         self.start_step = start_step
         self.end_step = end_step
@@ -137,12 +141,8 @@ class myDDIMSampler(DDIMSampler):
         self.loss_beta = loss_beta
         self.max_op_step = max_op_step
         self.add_theta = add_theta
-        self.sqrt_recip_alphas_cumprod_op = torch.sqrt(1.0 / self.model.alphas_cumprod_op).to(
-            self.model.device
-        ).detach()
-        self.sqrt_recipm1_alphas_cumprod_op = torch.sqrt(
-            1.0 / self.model.alphas_cumprod_op - 1
-        ).to(self.model.device).detach()
+        self.add_omega = add_omega
+        self.flat_ref = ref_lat
         self.model.zero_grad()
 
     def sample(
@@ -205,7 +205,7 @@ class myDDIMSampler(DDIMSampler):
         size = (batch_size, C, H, W)
         print(f"Data shape for DDIM sampling is {size}, eta {eta}")
 
-        samples,samples_other, intermediates = self.ddim_sampling(
+        samples, intermediates = self.ddim_sampling(
             conditioning,
             size,
             callback=callback,
@@ -225,7 +225,7 @@ class myDDIMSampler(DDIMSampler):
             dynamic_threshold=dynamic_threshold,
             ucg_schedule=ucg_schedule,
         )
-        return samples,samples_other, intermediates
+        return samples, intermediates
 
     def ddim_sampling(
         self,
@@ -300,25 +300,30 @@ class myDDIMSampler(DDIMSampler):
                 if ucg_schedule is not None:
                     assert len(ucg_schedule) == len(time_range)
                     unconditional_guidance_scale = ucg_schedule[i]
-            
-            outs = self.p_sample_ddim(
-                img,
-                cond,
-                ts,
-                index=index,
-                use_original_steps=ddim_use_original_steps,
-                quantize_denoised=quantize_denoised,
-                temperature=temperature,
-                noise_dropout=noise_dropout,
-                score_corrector=score_corrector,
-                corrector_kwargs=corrector_kwargs,
-                unconditional_guidance_scale=unconditional_guidance_scale,
-                unconditional_conditioning=unconditional_conditioning,
-                dynamic_threshold=dynamic_threshold,
-                total_steps=total_steps,
-            )
+                if (i <= self.end_step and i >= self.start_step):
+                    cond["text_info"]["cur_step"] = i
+                    max_op_step = self.max_op_step
+                    for op_step in range(max_op_step):
+                        img = self.add_glyph(img,cond)
+                        torch.cuda.empty_cache()
+                outs = self.p_sample_ddim(
+                    img,
+                    cond,
+                    ts,
+                    index=index,
+                    use_original_steps=ddim_use_original_steps,
+                    quantize_denoised=quantize_denoised,
+                    temperature=temperature,
+                    noise_dropout=noise_dropout,
+                    score_corrector=score_corrector,
+                    corrector_kwargs=corrector_kwargs,
+                    unconditional_guidance_scale=unconditional_guidance_scale,
+                    unconditional_conditioning=unconditional_conditioning,
+                    dynamic_threshold=dynamic_threshold,
+                    total_steps=total_steps,
+                )
             with torch.no_grad():
-                img, pred_x0,img_other,pred_x0_other = outs
+                img, pred_x0 = outs
                 if callback:
                     callback(i)
                 if img_callback:
@@ -328,10 +333,8 @@ class myDDIMSampler(DDIMSampler):
                     # print(index)
                     intermediates["x_inter"].append(img)
                     intermediates["pred_x0"].append(pred_x0)
-                    intermediates["pred_x0_other"].append(pred_x0_other)
-                    intermediates["x_inter_other"].append(img_other)
 
-        return img,img_other, intermediates
+        return img, intermediates
 
     def p_sample_ddim(
         self,
@@ -363,29 +366,6 @@ class myDDIMSampler(DDIMSampler):
                     model_t - model_uncond
                 )
 
-        # %-----------------------------------------------------------------------------------------%
-        # TODO: writing Test Time Augmentation
-        if (total_steps - index - 1 <= self.end_step and total_steps - index - 1 >= self.start_step):
-            max_op_step = self.max_op_step
-            # if total_steps - index - 1 == 0:
-            #     max_op_step = max(max_op_step, 10)
-            for op_step in range(max_op_step):
-                x_tar = x[: b // 2].clone().detach()# .requires_grad_(True)
-                x_src = x[b // 2 :].clone().detach()
-                x_tar = self.add_glyph(x_src,x_tar,c,t,model_output,index)
-                x = torch.cat([x_tar, x_src], dim=0)
-                del x_tar, x_src
-                torch.cuda.empty_cache()
-                with torch.no_grad():
-                    if unconditional_conditioning is None or unconditional_guidance_scale == 1.0:
-                        model_output = self.model.apply_model(x, t, c) # c is a dict!!!
-                    else:
-                        model_uncond = self.model.apply_model(x, t, unconditional_conditioning)
-                        model_t = self.model.apply_model(x, t, c)
-                        model_output = model_uncond + unconditional_guidance_scale * (
-                            model_t - model_uncond
-                        )
-        # %-----------------------------------------------------------------------------------------%
         with torch.no_grad():
             if self.model.parameterization == "v":  # Using  default eps in anytext
                 e_t = self.model.predict_eps_from_z_and_v(x, t, model_output)
@@ -443,37 +423,12 @@ class myDDIMSampler(DDIMSampler):
                 noise = torch.nn.functional.dropout(noise, p=noise_dropout)
             x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
 
-            pred_x0_other = self.model.predict_start_from_noise(x, t, model_output)
-            x_prev_other = a_prev.sqrt() * pred_x0_other + dir_xt + noise
-            return x_prev, pred_x0, x_prev_other,pred_x0_other
+            return x_prev, pred_x0
 
-    def predict_start_from_noise(self, x_t, t, noise):
-        return (
-            extract_into_tensor(self.sqrt_recip_alphas_cumprod_op, t, x_t.shape).to(
-                x_t.dtype
-            )
-            * x_t
-            - extract_into_tensor(self.sqrt_recipm1_alphas_cumprod_op, t, x_t.shape).to(
-                x_t.dtype
-            )
-            * noise
-        )
 
     def vae_decode(self,x, t, model_output):
-        # print(x.requires_grad)
-        # a = torch.ones_like(x)
-        # print("Test: ",(x*a).requires_grad)
         b = x.shape[0]
         pred_x0 = self.model.predict_start_from_noise(x, t, model_output)
-        # print(pred_x0.requires_grad)
-        # alphas_prev = self.ddim_alphas_prev
-        # sigmas = self.ddim_sigmas
-        # a_prev = torch.full((b, 1, 1, 1), alphas_prev[index], device=x.device)
-        # sigma_t = torch.full((b, 1, 1, 1), sigmas[index], device=x.device)
-        # noise = sigma_t * noise_like(x.shape, x.device, repeat_noise) * temperature
-        # e_t = model_output
-        # dir_xt = (1.0 - a_prev - sigma_t**2).sqrt() * e_t
-        # x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
         if self.model.use_vae_upsample:
             self.model.first_stage_model.zero_grad()
             decode_x0 = self.model.decode_first_stage(pred_x0)
@@ -489,7 +444,9 @@ class myDDIMSampler(DDIMSampler):
         # print(decode_x0.requires_grad)
         return decode_x0
 
-    def add_glyph(self,x_src,x_tar,c,t,model_output,index):
+    def add_glyph(self,x_tar,c):
+        x_src = self.flat_ref["samples"]
+        x_src = self.model.decode_first_stage(x_src)
         bsz = x_tar.shape[0]  
         print("Adding Glyph")
         # ref_ori = self.vae_decode(x_src,t[bsz:],model_output[bsz:])
@@ -497,14 +454,20 @@ class myDDIMSampler(DDIMSampler):
         for i in range(bsz):
             n_lines = c["text_info"]["n_lines"][i]
             for j in range(n_lines):
-                C,H,W = x_tar[i].shape
+                C,H,W = x_src[i].shape
+                glyph_img = F.interpolate(c["text_info"]["glyphs"][j][i].unsqueeze(0),(512,512)).detach()
+                # print(glyph_img.max())
+                glyph_img = torch.cat([glyph_img,glyph_img,glyph_img],dim=1)
                 # C,H,W = ref_ori[i].shape
                 pos = c["text_info"]["positions"][j][i]
                 pos = F.interpolate(pos.unsqueeze(0), (H, W)).squeeze(0)
                 # print(pos.shape)
+                mask = pos.permute(1,2,0).cpu().numpy()
+                rect_mask = np.zeros(mask.shape)
                 box = min_bounding_rect((rearrange(pos,"c h w -> h w c")*255).detach().cpu().numpy().astype(np.uint8))
+                cv2.fillPoly(rect_mask,[box],[1])
                 pts = np.float32([box[0], box[1], box[2], box[3]])
-                flat_pos = c["text_info"]["flat_positions"][j][i]
+                flat_pos = self.flat_ref["positions"][j][i]
                 flat_pos = F.interpolate(flat_pos.unsqueeze(0), (H, W)).squeeze(0)
                 flat_box = min_bounding_rect((rearrange(flat_pos,"c h w -> h w c")*255).detach().cpu().numpy().astype(np.uint8))
                 flat_pts = np.float32([flat_box[0],flat_box[1],flat_box[2],flat_box[3]])
@@ -514,39 +477,35 @@ class myDDIMSampler(DDIMSampler):
                 theta = torch.from_numpy(theta[:2, :]).unsqueeze(0).type(x_tar.dtype).to(x_tar.device)
                 theta = torch.cat([theta]*bsz,dim=0)
                 grid = F.affine_grid(theta, torch.Size([bsz, C, H, W]), align_corners=True)
-                
-                # ratio = ((x_tar[i] * pos).max() - (x_tar[i] * pos).min()) / (
-                #     (x_src[i] * flat_pos).max() - (x_src[i] * flat_pos).min()
-                # )
-                # x_src = (x_src-x_src[i].min()) * ratio + x_tar[i].min()
-                
+
                 ref = F.grid_sample(x_src, grid, align_corners=True)
-                # ref = x_src
-                # ref = torch.clamp(ref,ref.min(),ref.max())
+                # if (glyph_img*255-ref*glyph_img).mean() >= (ref*glyph_img).mean():
+                #     glyph_img = 1 - glyph_img
+                # glyph_img =  0.5*glyph_img
+                glyph_latent = self.model.get_first_stage_encoding(self.model.encode_first_stage(glyph_img))
+                ref = self.model.get_first_stage_encoding(self.model.encode_first_stage(ref))
 
-                # print("model_output",model_output[i].shape)
-                # print("t:",t[i].shape)
-                # ref_img = self.vae_decode(ref,t[bsz:],model_output[bsz:])
-                # ref_img = ref
-                # print(ref_img.shape)
-
-                # ref_img = rearrange(ref_img, "b c h w -> b h w c").cpu().numpy().clip(0, 255).astype(np.uint8)
-                # cv2.imshow("crop latent",ref_img[i])
-                # cv2.imshow("ori",ref_ori_img[i])
-                # cv2.waitKey(0)
-                # cv2.imshow("transform",ref[0])
-                # cv2.waitKey(0)
-                # ref_img = rearrange(ref_img,"b c h w->b w h c").squeeze(0)
-                # ref_img = ref_img.cpu().numpy()
-                # cv2.imshow("ref",ref_img)
-                # cv2.waitKey(0)
-                
                 # implementing AdaIN
-                valid_pixel = pos.sum()
-                masked_mean = (x_tar[i]*pos).sum() / valid_pixel
-                masked_std = ((x_tar[i]*pos).pow(2).sum() / valid_pixel - masked_mean.pow(2)).sqrt()
-                ref_mean = (ref[i]*pos).sum()/valid_pixel
-                ref_std = ((ref[i]*pos).pow(2).sum() / valid_pixel - ref_mean.pow(2)).sqrt()
-                x_tar[i] = x_tar[i]*(1-pos) + self.add_theta * pos * ((ref[i]-ref_mean)/ref_std  * masked_std + masked_mean)
+                C, H, W = x_tar[i].shape
+                rect_mask = torch.tensor(rect_mask).permute(2,0,1).unsqueeze(0).float().cuda()
+                rect_mask =  F.interpolate(rect_mask, (H, W))
+                # valid_pixel = rect_mask.sum()
+                # masked_mean = (x_tar[i]*rect_mask).sum(dim=(-2,-1)) / valid_pixel
+                # masked_std = ((x_tar[i]*rect_mask).pow(2).sum(dim=(-2,-1)) / valid_pixel - masked_mean.pow(2)).sqrt()
+                # ref_mean = (ref[i]*rect_mask).sum(dim=(-2,-1))/valid_pixel
+                # ref_std = ((ref[i]*rect_mask).pow(2).sum(dim=(-2,-1)) / valid_pixel - ref_mean.pow(2)).sqrt()
+                # # masked_std, masked_mean = torch.std_mean(x_tar[i], dim=(-2, -1))
+                # # ref_std, ref_mean = torch.std_mean(x_src[i], dim=(-2, -1))
+                # masked_mean = masked_mean.unsqueeze(-1).unsqueeze(-1)
+                # masked_std = masked_std.unsqueeze(-1).unsqueeze(-1)
+                # ref_mean = ref_mean.unsqueeze(-1).unsqueeze(-1)
+                # ref_std = ref_std.unsqueeze(-1).unsqueeze(-1)
+                glyph_latent = glyph_latent*(self.add_omega)+ref[i]*(1-self.add_omega)
+                # %--------------------------------------------------------------------------------------------%
+                # AdaIN within Mask
+                glyph_latent = AdaINnorm(x_tar[i],glyph_latent, rect_mask)
+                blend_factor = 10 ** -c["text_info"]["cur_step"]
+
+                x_tar[i] = x_tar[i]*(1-rect_mask) + self.add_theta * rect_mask * glyph_latent * blend_factor + (1 - blend_factor) * rect_mask * x_tar[i]
         print("Done Adding Glyph")
         return x_tar
