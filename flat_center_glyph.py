@@ -5,7 +5,10 @@ Code: https://github.com/tyxsspa/AnyText
 Copyright (c) Alibaba, Inc. and its affiliates.
 """
 
+import datetime
 import os
+from weakref import ref
+from matplotlib.pyplot import draw
 import torch
 from modelscope.pipelines import pipeline
 import cv2
@@ -20,11 +23,10 @@ from gradio.components import Component
 from pytorch_lightning import seed_everything
 import einops
 import time
+from PIL import Image
 
-
-from cldm.ctrl import AttentionStore
-from util import check_channels, resize_image, save_images, arr2tensor
-from t3_dataset import draw_glyph, draw_glyph2,draw_glyph3, get_caption_pos
+from util import check_channels, resize_image, save_images, arr2tensor,draw_glyph_curve,sep_mask,draw_pos,count_lines,get_lines
+from t3_dataset import draw_glyph, draw_glyph2, draw_glyph3, draw_glyph4, get_caption_pos
 
 BBOX_MAX_NUM = 8
 PLACE_HOLDER = "*"
@@ -62,6 +64,12 @@ def parse_args():
         help="Whether or not to use the CH->EN translator, which enable input Chinese prompt and cause ~4GB VRAM.",
     )
     parser.add_argument(
+        "--save_mem",
+        action="store_true",
+        default=False,
+        help="Whether or not to memory shift",
+    )
+    parser.add_argument(
         "--font_path",
         type=str,
         default="font/Arial_Unicode.ttf",
@@ -76,12 +84,12 @@ def parse_args():
     parser.add_argument(
         "--config_yaml",
         type=str,
-        default="./models_yaml/anytext_sd15.yaml",
+        default="./models_yaml/anytext_sd15.yaml", # wo _masa
     )
     parser.add_argument(
         "--save_path",
         type=str,
-        default="Result/for_paper_AnyText",
+        default="Result/for_paper",
         help="load a specified anytext checkpoint",
     )
     args = parser.parse_args()
@@ -89,6 +97,7 @@ def parse_args():
 
 
 args = parse_args()
+save_memory = args.save_mem
 img_save_folder = args.save_path
 infer_params = {
     "model": "damo/cv_anytext_text_generation_editing",
@@ -103,38 +112,26 @@ if load_model:
     # inference = pipeline("my-anytext-task", **infer_params)
     from cldm.model import create_model, load_state_dict
     from cldm.ddim_hacked import DDIMSampler
-    from cldm.cldm_show import myDDIMSampler
+    from cldm_mod.ddim_two_mask_add import myDDIMSampler
+    import yaml
+
+    with open(args.config_yaml, "r") as f:
+        config = yaml.load(f, Loader=yaml.FullLoader)
+    if (
+        "start_step" in config["model"]["params"]["control_stage_config"]["params"]
+        and "start_step" in config["model"]["params"]["control_stage_config"]["params"]
+    ):
+        masa_in_model = True
+    else:
+        masa_in_model = False
 
     model = create_model(args.config_yaml).cuda()
     # print(model.cond_stage_model.transformer.text_model.embeddings)
-    model.load_state_dict(load_state_dict(args.model_path, location="cuda"),strict=False)
-    ddim_sampler = myDDIMSampler(model)
+    model.load_state_dict(load_state_dict(args.model_path, location="cuda"),strict=True)
     # print(model.control_model.input_blocks.state_dict().keys())
     # print(model.control_model.input_blocks[5][1].transformer_blocks[0])
 
 font = ImageFont.truetype("./font/Arial_Unicode.ttf", size=60)
-
-
-def count_lines(prompt):
-    prompt = prompt.replace("“", '"')
-    prompt = prompt.replace("”", '"')
-    p = '"(.*?)"'
-    strs = re.findall(p, prompt)
-    if len(strs) == 0:
-        strs = [" "]
-    return len(strs)
-
-
-def get_lines(prompt):
-    prompt = prompt.replace("“", '"')
-    prompt = prompt.replace("”", '"')
-    p = '"(.*?)"'
-    strs = re.findall(p, prompt)
-    if len(strs) == 0:
-        strs = [" "]
-    for strs_idx, strs_item in enumerate(strs):
-        prompt = prompt.replace('"' + strs_item + '"', '"' + f" {PLACE_HOLDER} " + '"')
-    return strs, prompt
 
 
 def generate_rectangles(w, h, n, max_trys=200):
@@ -221,113 +218,108 @@ def draw_rects(width, height, rects):
         cv2.rectangle(img, (x1, y1), (x2, y2), 255, -1)
     return img
 
-
-def sep_mask(pos_imgs, sort_radio="↕"):
-    # print(pos_imgs.max())
-    pos_imgs = cv2.cvtColor(pos_imgs, cv2.COLOR_BGR2GRAY)
-    _, pos_imgs = cv2.threshold(pos_imgs, 254, 255, cv2.THRESH_BINARY)
-    # cv2.imshow('image',pos_imgs)
-    # cv2.waitKey(0)
-    contours, _ = cv2.findContours(pos_imgs, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    # print(contours)
-    if sort_radio == "↕":
-        contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[1])
-    else:
-        contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[0])
-    # poly = []
-    # for contour in contours:
-    #     rect = cv2.minAreaRect(contour)
-    #     box = cv2.boxPoints(rect)
-    #     box = np.intp(box)
-    #     poly.append(box)
-    # print(poly)
-    # return poly
-    return contours
-
-
-def draw_pos(ploygon, prob=1.0):
-    img = np.zeros((512, 512, 1))
-    if random.random() < prob:
-        pts = ploygon.reshape((-1, 1, 2))
-        cv2.fillPoly(img, [pts], color=255)
-    # cv2.imshow("image", img)
-    # cv2.waitKey(0)
-    return img / 255.
-
-def inference(input_data, **params):
-    (
-        H,
-        W,
-    ) = (params["image_height"], params["image_width"])
-    prompt = input_data["prompt"]
-    seed = input_data["seed"]
-    if seed == -1:
-        seed = random.randint(0, 65535)
-    seed_everything(seed)
-    if save_memory:
-        model.low_vram_shift(is_diffusing=False)
-    pos_imgs = input_data["draw_pos"]
-    polygons = sep_mask(pos_imgs,sort_radio=params["sort_priority"])
-    info = {}
-    info["ori_prompt"] = prompt + "," + params["a_prompt"]
-    info["attn_ctrl"] = AttentionStore()
-    info["glyphs"] = []
-    info["polygons"] = polygons
-    info["gly_line"] = []
-    info["positions"] = []
-    # info["font"] = font
-    texts, prompt = get_lines(prompt)
-    info["texts"] =  texts
-    info["prompt"] = prompt + "," + params["a_prompt"]
-    # print(prompt)
-    # print(texts)
-    for idx, text in enumerate(texts):
-        gly_line = draw_glyph(font, text)
-        glyphs, angle, center = draw_glyph3(font, text, polygons[idx], scale=2)
-        info["gly_line"] += [arr2tensor(gly_line, params["image_count"])]
-        info["glyphs"] += [arr2tensor(glyphs, params["image_count"])]   
-    # cv2.destroyAllWindows()
-    positions = []
-    for idx, poly in enumerate(polygons):
-        positions += [draw_pos(poly, 1.0)]
-        info["positions"] += [arr2tensor(positions[idx], params["image_count"])] # shape [batch_size ,1 , 512, 512]
-    # print(info["positions"][0].shape)
-    # padding
-    n_lines = min(len(texts), max_lines)
-    info["n_lines"] = n_lines
-    n_pad = max_lines - n_lines
-    if n_pad > 0:
-        positions += [np.zeros((512, 512, 1))] * n_pad
-
-    info["n_lines"] = [n_lines] * params["image_count"]
-    # get masked_x
-    hint = np.sum(positions, axis=0).clip(0, 1)
-    # print(hint.shape)
+def get_masked_x(hint, H, W):
     ref_img = np.ones((H, W, 3)) * 127.5
     masked_img = ((ref_img.astype(np.float32) / 127.5) - 1.0) * (1 - hint)
     masked_img = np.transpose(masked_img, (2, 0, 1))
     masked_img = torch.from_numpy(masked_img.copy()).float().cuda()
     encoder_posterior = model.encode_first_stage(masked_img[None, ...])
     masked_x = model.get_first_stage_encoding(encoder_posterior).detach()
+
+    return masked_x
+
+def get_latent(prompt, polygons, params, flat_ref=None):
+    """
+    Args:
+        prompt: str, the prompt text
+        polygons: list of list of tuple, the list of polygons
+        params: dict, the parameters
+        flat_ref: dict, with the flat reference tensor in it
+    """
+    H, W = (params["image_height"], params["image_width"])
+    info = {}
+    info["glyphs"] = []
+    info["polygons"] = polygons
+    info["gly_line"] = []
+    info["positions"] = []
+    info["step_size"] = params["step_size"]
+    # info["font"] = font
+    texts, prompt = get_lines(prompt)
+    info["texts"] = texts
+    n_lines = min(len(texts), max_lines)
+    info["n_lines"] = [n_lines] * params["image_count"]
+    positions = []
+
+    for idx, text in enumerate(texts):
+        gly_line = draw_glyph(font, text)
+        if params["curve"]:
+            glyphs, angle, center = draw_glyph_curve(font, text, polygons[idx], scale=2)
+        else:
+            glyphs, angle, center = draw_glyph3(font, text, polygons[idx], scale=2)
+        info["gly_line"] += [arr2tensor(gly_line, params["image_count"])]
+        info["glyphs"] += [arr2tensor(glyphs, params["image_count"])]
+    for idx, poly in enumerate(polygons):
+        positions += [draw_pos(poly, 1.0)]
+        info["positions"] += [
+            arr2tensor(positions[idx], params["image_count"])
+        ]  # shape [batch_size ,1 , 512, 512]
+    # get masked_x
+    hint = np.sum(positions, axis=0).clip(0, 1)
+    masked_x = get_masked_x(hint, H, W)
+    # print(hint.shape)
     info["masked_x"] = torch.cat(
         [masked_x for _ in range(params["image_count"])], dim=0
     )
-
-    info["times"] = params["times"]
-    info["times1"] = params["times1"]
-
     hint = arr2tensor(hint, params["image_count"])
+
+    if flat_ref is None:
+        info["use_masa"] = False
+        ddim_sampler = DDIMSampler(model=model)
+        batch_size = params["image_count"]
+    else:
+        ddim_sampler = myDDIMSampler(
+            model,
+            ref_lat=flat_ref,
+            start_step=params["start_op_step"],
+            end_step=params["end_op_step"],
+            max_op_step=params["OPTIMIZE_STEPS"],
+            loss_alpha=0.,
+            loss_beta=0.,
+            # loss_alpha=params["alpha"],
+            # loss_beta=params["beta"],
+            add_theta=params["theta"],
+            add_omega=params["omega"],
+            save_mem=save_memory,
+            use_masa=masa_in_model,
+        )
+        if masa_in_model:
+            batch_size = params["image_count"] * 2
+            info["flat_glyphs"] = flat_ref["glyphs"]
+            info["flat_positions"] = flat_ref["positions"]
+            info["flat_masked_x"] = flat_ref["masked_x"]
+            info["use_masa"] = True
+            info["attn_mask"] = [
+                torch.cat([i.unsqueeze(0) for i in info["flat_positions"]], dim=0)
+                .sum(dim=0, keepdim=True)
+                .squeeze(0),
+                torch.cat([i.unsqueeze(0) for i in info["positions"]], dim=0)
+                .sum(dim=0, keepdim=True)
+                .squeeze(0),
+            ]
+        else:
+            batch_size = params["image_count"]
+
     cond = model.get_learned_conditioning(
         dict(
             c_concat=[hint],
-            c_crossattn=[[prompt + "," + params["a_prompt"]] * params["image_count"]],
+            c_crossattn=[[prompt + "," + params["a_prompt"]] * batch_size],
             text_info=info,
         )
     )
     un_cond = model.get_learned_conditioning(
         dict(
             c_concat=[hint],
-            c_crossattn=[[params["n_prompt"]] * params["image_count"]],
+            c_crossattn=[[params["n_prompt"]] * batch_size],
             text_info=info,
         )
     )
@@ -335,10 +327,9 @@ def inference(input_data, **params):
     if save_memory:
         model.low_vram_shift(is_diffusing=True)
     model.control_scales = [params["strength"]] * 13
-    tic = time.time()
     samples, intermediates = ddim_sampler.sample(
         params["ddim_steps"],
-        params["image_count"],
+        batch_size,
         shape,
         cond,
         log_every_t=1,
@@ -347,29 +338,49 @@ def inference(input_data, **params):
         unconditional_guidance_scale=params["cfg_scale"],
         unconditional_conditioning=un_cond,
     )
+    now = datetime.datetime.now()
+    date_str = now.strftime("%m-%d-%H-%M")
+    # if flat_ref is not None:
+    #     for idx, x_inter in enumerate(intermediates["x_inter"]):
+    #         # print(idx)
+    #         # x_inter = model.decode_first_stage(x_inter)
+    #         decode_x0 = model.decode_first_stage(intermediates["pred_x0"][idx])
+    #         decode_x0 = torch.clamp(decode_x0, -1, 1)
+    #         decode_x0 = (decode_x0 + 1.0) / 2.0 * 255  # -1,1 -> 0,255; n, c,h,w
+    #         decode_x0 = einops.rearrange(decode_x0, "b c h w -> b h w c").cpu().numpy().clip(0, 255).astype(np.uint8)
+    #         x_inter = (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
+    #         # if not os.path.exists(os.path.join(img_save_folder,f"{prompt.replace(' ','_')}","inter")):
+    #         #     os.makedirs(os.path.join(img_save_folder, "inter"))
+    #         # for i in range(params['image_count']):
+    #         #     cv2.imwrite(os.path.join(img_save_folder, "inter",f"{idx}_{i}.png"), x_inter[i])
+    #         if not os.path.exists(os.path.join(img_save_folder, "pred_x0")):
+    #             os.makedirs(os.path.join(img_save_folder, "pred_x0"))
+    #         for i in range(params['image_count']):
+    #             cv2.imwrite(os.path.join(img_save_folder, "pred_x0",f"{idx}_{i}.png"), decode_x0[i])
+    info["samples"] = samples
+    return info
 
-    # for idx, x_inter in enumerate(intermediates["x_inter"]):
-    #     # print(idx)
-    #     # x_inter = model.decode_first_stage(x_inter)
-    #     decode_x0 = model.decode_first_stage(intermediates["pred_x0_other"][idx])
-    #     decode_x0 = torch.clamp(decode_x0, -1, 1)
-    #     decode_x0 = (decode_x0 + 1.0) / 2.0 * 255  # -1,1 -> 0,255; n, c,h,w
-    #     decode_x0 = einops.rearrange(decode_x0, "b c h w -> b h w c").cpu().numpy().clip(0, 255).astype(np.uint8)
-    #     x_inter = (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
-    #     # if not os.path.exists(os.path.join(img_save_folder,"inter")):
-    #     #     os.makedirs(os.path.join(img_save_folder, "inter"))
-    #     # for i in range(params["image_count"]):
-    #     #     cv2.imwrite(os.path.join(img_save_folder, "inter",f"{i}_{idx}.png"), x_inter[i])
-    #     if not os.path.exists(os.path.join(img_save_folder, "pred_x0")):
-    #         os.makedirs(os.path.join(img_save_folder, "pred_x0"))
-    #     for i in range(params["image_count"]):
-    #         cv2.imwrite(os.path.join(img_save_folder, "pred_x0",f"{i}_{idx}.png"), decode_x0[i])
+def inference(input_data, **params):
+    prompt = input_data["prompt"]
+    seed = input_data["seed"]
+    if seed == -1:
+        seed = random.randint(0, 65535)
+    seed_everything(seed)
+    if save_memory:
+        model.low_vram_shift(is_diffusing=False)
+    pos_imgs = input_data["draw_pos"]
+    flat_pos = input_data["draw_ref"]
+    polygons = sep_mask(pos_imgs, sort_radio=params["sort_priority"])
+    flat_polygons = sep_mask(flat_pos, sort_radio=params["sort_priority"])
+    tic = time.time()
+    flat_ref = get_latent(prompt, polygons=flat_polygons, params=params)
+    info = get_latent(prompt, polygons, params, flat_ref=flat_ref)
+    samples = info["samples"]
 
     cost = (time.time() - tic) * 1000.0
     if save_memory:
         model.low_vram_shift(is_diffusing=False)
     x_samples = model.decode_first_stage(samples)
-    # print(x_samples.shape) # 4, 3 512, 512
     x_samples = (
         (einops.rearrange(x_samples, "b c h w -> b h w c") * 127.5 + 127.5)
         .cpu()
@@ -407,9 +418,18 @@ def process(
     n_prompt,
     times,
     times1,
+    step_size,
+    lamb,
+    op_steps,
+    start_op_step, # -1
+    end_op_step, # -1
+    add_theta,
+    add_omega,
+    draw_ref,
+    use_curve,
     *rect_list,
-    angle=0,
 ):
+    torch.cuda.empty_cache()
     n_lines = count_lines(prompt)
     # Text Generation
     if mode == "gen":
@@ -424,6 +444,16 @@ def process(
                     pos_imgs = pos_imgs.clip(0, 255).astype(np.uint8)
             else:
                 pos_imgs = np.zeros((w, h, 1))
+            if draw_ref is not None:
+                ref_pos = 255 - draw_ref["image"]
+                if "mask" in draw_ref:
+                    ref_pos = ref_pos.astype(np.float32) + draw_ref["mask"][
+                        ..., 0:3
+                    ].astype(np.float32)
+                    ref_pos = ref_pos.clip(0, 255).astype(np.uint8)
+                else:
+                    ref_pos = np.zeros((w, h, 1))
+                
         elif pos_radio == "Manual-rect(拖框)":
             rect_check = rect_list[:BBOX_MAX_NUM]
             rect_xywh = rect_list[BBOX_MAX_NUM:]
@@ -485,11 +515,20 @@ def process(
         "lora_path_ratio": lora_path_ratio,
         "times":times,
         "times1":times1,
+        "step_size":step_size,
+        "lambda":lamb,
+        "start_op_step":int(start_op_step),
+        "end_op_step":int(end_op_step),
+        "OPTIMIZE_STEPS":int(op_steps),
+        "theta":add_theta,
+        "omega":add_omega,
+        "curve":use_curve,
     }
     input_data = {
         "prompt": prompt,
         "seed": seed,
         "draw_pos": pos_imgs,  # numpy (w, h, 1)
+        "draw_ref": ref_pos,
         "ori_image": ori_img,
     }
 
@@ -498,6 +537,10 @@ def process(
     # if rtn_code >= 0:
     save_images(results, img_save_folder)
     print(f"Done, result images are saved in: {img_save_folder}")
+    #     if rtn_warning:
+    #         gr.Warning(rtn_warning)
+    # else:
+    #     raise gr.Error(rtn_warning)
     return results , gr.Markdown(f"Time: {time}", visible=show_debug)
 
 
@@ -571,6 +614,7 @@ with block:
             result_info = gr.Markdown("", visible=False)
             with gr.Row():
                 gr.Markdown("")
+                use_curve = gr.Checkbox(label="Use Bezier glyph draw(是否使用贝塞尔曲线拟合mask)", value=True)
                 run_gen = gr.Button(value="Run(运行)!", scale=0.3, elem_classes="run")
                 gr.Markdown("")
             with gr.Row():
@@ -659,7 +703,7 @@ with block:
                         label="Image Count(图片数)",
                         minimum=1,
                         maximum=12,
-                        value=4,
+                        value=1,
                         step=1,
                     )
                     ddim_steps = gr.Slider(
@@ -725,6 +769,19 @@ with block:
                 )
                 base_model_path = gr.Textbox(label="Base Model Path(基模地址)")
                 lora_path_ratio = gr.Textbox(label="LoRA Path and Ratio(lora地址和比例)")
+
+            with gr.Accordion("🛠Optimization Parameters(优化参数)", open=False):
+                with gr.Row(variant="compact"):
+                    step_size = gr.Number(label="Step Size(优化步长)", value=0)
+                    lamd = gr.Number(label="Lambda(loss系数)",value=0)
+                    op_step = gr.Number(label="Optimize Steps(优化步数)", value=1)
+                with gr.Row(variant="compact"):
+                    start_op_step = gr.Number(label="Start Optimize Step(结束优化的inference步数)", value=0)
+                    end_op_step = gr.Number(label="End Optimize Step(结束优化的inference步数)", value=10)
+                with gr.Row(variant="compact"):
+                    add_theta = gr.Number(label="Theta(Add glyph 系数)", value=0.5)
+                    add_omega = gr.Number(label="Omega(Add Flatten 系数)", value=0.45)
+
             prompt = gr.Textbox(label="Prompt(提示词)")
             with gr.Tabs() as tab_modes:
                 with gr.Tab(
@@ -748,6 +805,9 @@ with block:
                         )
                     upload_button = gr.UploadButton(
                         "Click to upload Mask", file_types=["image"]
+                    )
+                    upload_ref_button = gr.UploadButton(
+                        "Click to upload ref Mask", file_types=["image"]
                     )
                     # gr.Markdown('<span style="color:silver;font-size:12px">try to revise according to text\'s bounding rectangle(尝试通过渲染后的文字行的外接矩形框修正位置)</span>')
                     with gr.Row(variant="compact"):
@@ -843,9 +903,24 @@ with block:
                         show_label=False,
                         visible=False,
                     )
+                    rect_ref = gr.Image(
+                        value=create_canvas(),
+                        label="Reference Rext Position(方框位置)",
+                        elem_id="MD-bbox-rect-t2i",
+                        show_label=False,
+                        visible=False,
+                    )
                     draw_img = gr.Image(
                         value=create_canvas(),
                         label="Draw Position(绘制位置)",
+                        visible=True,
+                        tool="sketch",
+                        show_label=False,
+                        brush_radius=100,
+                    )
+                    draw_ref = gr.Image(
+                        value=create_canvas(),
+                        label=" Reference Draw Position(参考mask绘制位置)",
                         visible=True,
                         tool="sketch",
                         show_label=False,
@@ -860,16 +935,12 @@ with block:
                         ]
 
                     draw_img.clear(re_draw, None, [draw_img, image_width, image_height])
-                    image_width.release(
-                        resize_w,
-                        [image_width, rect_img, draw_img],
-                        [rect_img, draw_img],
-                    )
-                    image_height.release(
-                        resize_h,
-                        [image_height, rect_img, draw_img],
-                        [rect_img, draw_img],
-                    )
+                    image_width.release(resize_w,[image_width, rect_img, draw_img],[rect_img, draw_img])
+                    image_height.release(resize_h,[image_height, rect_img, draw_img],[rect_img, draw_img])
+
+                    draw_ref.clear(re_draw, None, [draw_ref, image_width, image_height])
+                    image_width.release(resize_w, [image_width,rect_ref, draw_ref], [rect_ref,draw_ref])
+                    image_height.release(resize_h, [image_height, draw_ref], [rect_ref,draw_ref])
 
                     def change_options(selected_option):
                         return [
@@ -997,7 +1068,7 @@ with block:
                             ],
                             [
                                 prompt,
-                                draw_img,
+                                draw_ref,
                                 pos_radio,
                                 sort_radio,
                                 revise_pos,
@@ -1284,6 +1355,15 @@ with block:
         n_prompt,
         Clip_times,
         Clip_times1,
+        step_size,
+        lamd,
+        op_step,
+        start_op_step,
+        end_op_step,
+        add_theta,
+        add_omega,
+        draw_ref,
+        use_curve,
         *(rect_cb_list + rect_xywh_list),
     ]
     run_gen.click(
@@ -1297,6 +1377,7 @@ with block:
         outputs=[result_gallery, result_info],
     )
     upload_button.upload(mask_upload,inputs=[upload_button],outputs=[draw_img])
+    upload_ref_button.upload(mask_upload,inputs=[upload_ref_button],outputs=[draw_ref])
 
 
 block.launch(

@@ -250,6 +250,9 @@ def get_edge(attn_map):
     return sobel_sum
 
 
+
+
+
 def save_images(img_list, folder):
     if not os.path.exists(folder):
         os.makedirs(folder)
@@ -671,16 +674,11 @@ def draw_polygon(
 
 
 def draw_glyph_curve(
-    font: ImageFont.FreeTypeFont = None,
-    text: str = "",
-    polygon: np.ndarray = None,
-    scale: float = 1,
-    width: int = 512,
-    height: int = 512,
-    add_space: bool = True,
-    offset_angle: float = 0,
-) -> tuple[np.ndarray, float, tuple]:
-
+        font: ImageFont.FreeTypeFont = None, text: str = '', polygon: np.ndarray = None, 
+        scale: float = 1, width: int = 512, height: int = 512, 
+        add_space: bool = True, offset_angle: float = 0,discard_ratio: float=0.1
+        ) -> tuple[np.ndarray, float, tuple]:
+    
     enlarge_polygon = polygon * scale
 
     # 获取多边形旋转中心、长宽与旋转角度
@@ -698,62 +696,54 @@ def draw_glyph_curve(
     down_control_points = rotate_points(bezier_control_points[1], center, -angle)[::-1]
     avg_control_points = (up_control_points + down_control_points) / 2
     del bezier_control_points
-
-    up_points = np.array(
-        [generate_bezier_cubic(up_control_points, t) for t in np.linspace(0, 1, 100)]
-    )
-    down_points = np.array(
-        [generate_bezier_cubic(down_control_points, t) for t in np.linspace(0, 1, 100)]
-    )
+    
+    up_points = np.array([generate_bezier_cubic(up_control_points, t) for t in np.linspace(0, 1, 100)])
+    down_points = np.array([generate_bezier_cubic(down_control_points, t) for t in np.linspace(0, 1, 100)])
     avg_points = (up_points + down_points) / 2
 
-    img = draw_polygon(
-        width*scale,
-        height*scale,
-        np.concatenate([up_points, down_points[::-1]], axis=0),
-        color="red",
-    )
-    # img.save("draw_glyph_test/bezier_curve.png")
-    # img = draw_polygon(width, height, avg_points, color="red")
-    # img.save("draw_glyph_test/bezier_curve_avg.png")
-
-    # 估计文本框尺寸，并基于文本框尺寸预测文本大小
-    bezier_width = np.linalg.norm(avg_points[1:] - avg_points[:-1], axis=1).sum()
+    img = draw_polygon(width * scale, height * scale, np.concatenate([up_points, down_points[::-1]], axis=0), color='red')
+    img.save('draw_glyph_test/bezier_curve.png')
+    img = draw_polygon(width * scale, width * scale, avg_points, color='red')
+    img.save('draw_glyph_test/bezier_curve_avg.png')
+    
+    # 估计文本框尺寸，并基于文本框尺寸预测文本大小，需要丢弃曲线两端一定比例
+    discard_ratio = 0.1
+    bezier_width = min(np.linalg.norm(avg_points[1:] - avg_points[:-1], axis=1).sum(), 
+                       np.linalg.norm(up_points[1:] - up_points[:-1], axis=1).sum(),
+                       np.linalg.norm(down_points[1:] - down_points[:-1], axis=1).sum())
     bezier_height = np.linalg.norm(up_points - down_points, axis=1).max()
-    text, font = estimate_text_size(font, text, bezier_width, bezier_height)
-
+    text, font = estimate_text_size(font, text, bezier_width * (1 - 2 * discard_ratio), bezier_height)
+    
     # 获取逐字符时间
-    char_times = [0.0]
+    char_times = [0.]
     for c in text:
         c_left, _, c_right, _ = font.getbbox(c)
         char_times.append(char_times[-1] + c_right - c_left)
     char_times = np.array(char_times)
+
+
     text_time = char_times[-1] / bezier_width
     char_times = char_times / char_times[-1] * text_time
-    char_times -= (text_time - 1) / 2
+    char_times -= (text_time - 1 ) / 2
 
-    img = Image.new("RGBA", (width*scale, height*scale), (0, 0, 0, 0))
-    for i, (c, left_time, right_time) in enumerate(
-        zip(text, char_times[:-1], char_times[1:])
-    ):
-        img_c = Image.new("RGBA", (width*scale, height*scale), (0, 0, 0, 0))
+    img = Image.new('RGBA', (width * scale, height * scale), (0, 0, 0, 0))
+    for i, (c, left_time, right_time) in enumerate(zip(text, char_times[:-1], char_times[1:])):
+        img_c = Image.new('RGBA', (width * scale, height * scale), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img_c)
         center_time = (left_time + right_time) / 2
 
         left_point = generate_bezier_cubic(avg_control_points, left_time)
         right_point = generate_bezier_cubic(avg_control_points, right_time)
         center_point = generate_bezier_cubic(avg_control_points, center_time)
-
-        draw.point(tuple(center_point), fill="blue")
-
+        
+        draw.point(tuple(center_point), fill='blue')
+        
         vec = np.array(right_point - left_point)
         angle_c = np.degrees(np.arctan2(vec[1], vec[0]))
         bbox = font.getbbox(c)
 
         left_top = center_point - np.array([bbox[2] + bbox[0], bbox[3] + bbox[1]]) / 2
-        right_bottom = (
-            center_point + np.array([bbox[2] + bbox[0], bbox[3] + bbox[1]]) / 2
-        )
+        right_bottom = center_point + np.array([bbox[2] + bbox[0], bbox[3] + bbox[1]]) / 2
         draw.text((left_top[0], left_top[1]), c, font=font, fill=(255, 255, 255, 255))
         # draw.rectangle((left_top[0], left_top[1], right_bottom[0], right_bottom[1]), outline='green')
         # img_c.save(f'draw_glyph_test/glyph_c_{i}.png')

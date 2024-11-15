@@ -18,13 +18,13 @@ def parse_args():
     parser.add_argument(
         "--json_path",
         type=str,
-        default='/data/vdb/yuxiang.tyx/AIGC/data/wukong_word/test1k.json',
+        default='/data/Datasets/AnyText-benchmark/benchmark/laion_word/test1k.json',
         help="json path for evaluation dataset",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default='/data/vdb/yuxiang.tyx/AIGC/data/wukong_word/glyph_wukong',
+        default='/data/Datasets/AnyText-benchmark/benchmark/laion_word/glyph_wukong',
         help="output path, clear the folder if exist",
     )
     parser.add_argument(
@@ -33,7 +33,7 @@ def parse_args():
         default=1000,
         help="image count",
     )
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
     return args
 
 
@@ -51,6 +51,7 @@ if __name__ == '__main__':
         all_glyphs = []
         for k, glyphs in enumerate(data['glyphs']):
             all_glyphs += [glyphs[0].numpy().astype(np.int32)*255]
+        print(len(data['glyphs']))
         glyph_img = cv2.resize(255.0-np.sum(all_glyphs, axis=0), (512, 512))
         cv2.imwrite(os.path.join(args.output_dir, data['img_name'][0]), glyph_img)
         pbar.update(1)

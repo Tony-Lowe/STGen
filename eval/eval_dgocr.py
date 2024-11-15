@@ -6,7 +6,7 @@ from modelscope.utils.constant import Tasks
 import cv2
 from cldm.recognizer import TextRecognizer, crop_image
 from easydict import EasyDict as edict
-from anytext_singleGPU import load_data, get_item
+from eval.anytext_singleGPU import load_data, get_item
 from tqdm import tqdm
 import os
 import torch

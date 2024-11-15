@@ -23,18 +23,17 @@ seeds = {
     'A nice drawing in pencil of Michael Jackson,  with the words "Micheal" and "Jackson" written on it': 83866922,
 }
 mask_lists = [
-    """./masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1_1_1_1_1.png""",
-    """./masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1_1_1_1.png""",
-    """./masks/A nice drawing in pencil of Michael Jackson,  with the words "Micheal" and "Jackson" written on it_1_1.png""",
-    """./masks/A nice drawing in pencil of Michael Jackson,  with the words "Micheal" and "Jackson" written on it_1.png""",
-    """./masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1_1_1.png""",
-    """./masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it_1_1_1.png""",
-    """./masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1_1.png""",
-    """./masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1.png""",
-    """./masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman".png""",
-    """./masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it_1_1.png""",
-    """./masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it_1.png""",
-    """./masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it.png""",
+    """Result/ori/masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1_1_1_1.png""",
+    """Result/ori/masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1_1_1.png""",
+    """Result/ori/masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1_1.png""",
+    """Result/ori/masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1.png""",
+    """Result/ori/masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman".png""",
+    """Result/ori/masks/A nice drawing in pencil of Michael Jackson,  with the words "Micheal" and "Jackson" written on it_1_1.png""",
+    """Result/ori/masks/A nice drawing in pencil of Michael Jackson,  with the words "Micheal" and "Jackson" written on it_1.png""",
+    """Result/ori/masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it_1_1_1.png""",
+    """Result/ori/masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it_1_1.png""",
+    """Result/ori/masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it_1.png""",
+    """Result/ori/masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it.png""",
 ]
 ref_mask_list = {
     'A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"': "example_images/gen18.png",
@@ -160,7 +159,7 @@ def para_op(theta: float,omega: float) -> float:
         acc = ocr_acc(imgs, info)
         clip_s = clip_score(prompt, imgs)
         logger.info(f"Ocr acc: {acc}, Clip Score: {clip_s}")
-        res += 1 - (0.7 * acc + clip_s * 0.3)
+        res += 1 - (0.5 * acc + clip_s * 0.5)
     print(res / num)
     logger.info(f"Loss: {res/num}")
     return res / num
@@ -168,8 +167,8 @@ def para_op(theta: float,omega: float) -> float:
 
 parametrization = ng.p.Instrumentation(
     # an integer from 1 to 12
-    theta=ng.p.Scalar(lower=0, upper=1),
-    omega=ng.p.Scalar(lower=0, upper=1),
+    theta=ng.p.Scalar(lower=-0.5, upper=-0.3),
+    omega=ng.p.Scalar(lower=0.6, upper=0.9),
 )
 
 optimizer = ng.optimizers.NGOpt(parametrization=parametrization, budget=100)

@@ -11,6 +11,8 @@ dependencies:
   - numpy=1.23.5
   - cython==0.29.33
   - pip:
+      - torch==2.0.1
+      - torchvision==0.15.2
       - Pillow==9.5.0
       - gradio==3.50.0
       - albumentations==0.4.3
@@ -35,8 +37,6 @@ dependencies:
       - jieba==0.42.1
       - modelscope==1.10.0
       - tensorflow==2.13.0
-      - torch==2.0.1
-      - torchvision==0.15.2
       - easydict==1.10
       - xformers==0.0.20
       - subword-nmt==0.3.8
@@ -48,3 +48,4 @@ dependencies:
       - tqdm
       - openai
       - scikit-learn
+      - python-Levenshtein

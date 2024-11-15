@@ -14,6 +14,7 @@ import einops
 import time
 from PIL import Image
 
+
 from mllm import GPT4_maskGen, get_pos_n_glyph
 from util import (
     check_channels,
@@ -157,7 +158,6 @@ if load_model:
     from cldm.model import create_model, load_state_dict
     from cldm_mod.ddim_two_mask_add import myDDIMSampler
     from cldm.ddim_hacked import DDIMSampler
-
     model = create_model(args.config_yaml).cuda()
     # print(model.cond_stage_model.transformer.text_model.embeddings)
     model.load_state_dict(
@@ -168,22 +168,25 @@ if load_model:
 font = ImageFont.truetype("./font/Arial_Unicode.ttf", size=60)
 
 
+def get_masked_x(hint, H,W):
+    ref_img = np.ones((H, W, 3)) * 127.5
+    masked_img = ((ref_img.astype(np.float32) / 127.5) - 1.0) * (1 - hint)
+    masked_img = np.transpose(masked_img, (2, 0, 1))
+    masked_img = torch.from_numpy(masked_img.copy()).float().cuda()
+    encoder_posterior = model.encode_first_stage(masked_img[None, ...])
+    masked_x = model.get_first_stage_encoding(encoder_posterior).detach()
+
+    return masked_x
+
+
 def get_latent(prompt, polygons, params, flat_ref=None):
-    if flat_ref is None:
-        ddim_sampler = DDIMSampler(model=model)
-    else:
-        ddim_sampler = myDDIMSampler(
-            model,
-            ref_lat=flat_ref,
-            start_step=params["start_op_step"],
-            end_step=params["end_op_step"],
-            max_op_step=params["OPTIMIZE_STEPS"],
-            loss_alpha=params["alpha"],
-            loss_beta=params["beta"],
-            add_theta=params["theta"],
-            add_omega=params["omega"],
-            save_mem=save_memory,
-        )
+    """
+    Args:
+        prompt: str, the prompt text
+        polygons: list of list of tuple, the list of polygons
+        params: dict, the parameters
+        flat_ref: dict, with the flat reference tensor in it
+    """
     H, W = (params["image_height"], params["image_width"])
     info = {}
     info["glyphs"] = []
@@ -199,7 +202,7 @@ def get_latent(prompt, polygons, params, flat_ref=None):
     positions = []
     for idx, text in enumerate(texts):
         gly_line = draw_glyph(font, text)
-        glyphs, angle, center = draw_glyph_curve(font, text, polygons[idx], scale=2)
+        glyphs, angle, center = draw_glyph3(font, text, polygons[idx], scale=2)
         info["gly_line"] += [arr2tensor(gly_line, params["image_count"])]
         info["glyphs"] += [arr2tensor(glyphs, params["image_count"])]
     for idx, poly in enumerate(polygons):
@@ -209,18 +212,32 @@ def get_latent(prompt, polygons, params, flat_ref=None):
         ]  # shape [batch_size ,1 , 512, 512]
     # get masked_x
     hint = np.sum(positions, axis=0).clip(0, 1)
+    masked_x = get_masked_x(hint, H,W)
     # print(hint.shape)
-    ref_img = np.ones((H, W, 3)) * 127.5
-    masked_img = ((ref_img.astype(np.float32) / 127.5) - 1.0) * (1 - hint)
-    masked_img = np.transpose(masked_img, (2, 0, 1))
-    masked_img = torch.from_numpy(masked_img.copy()).float().cuda()
-    encoder_posterior = model.encode_first_stage(masked_img[None, ...])
-    masked_x = model.get_first_stage_encoding(encoder_posterior).detach()
     info["masked_x"] = torch.cat(
         [masked_x for _ in range(params["image_count"])], dim=0
     )
     hint = arr2tensor(hint, params["image_count"])
+
+    if flat_ref is None:
+        info["use_masa"] = False
+        ddim_sampler = DDIMSampler(model=model)
+    else:
+        ddim_sampler = myDDIMSampler(
+            model,
+            ref_lat=flat_ref,
+            start_step=params["start_op_step"],
+            end_step=params["end_op_step"],
+            max_op_step=params["OPTIMIZE_STEPS"],
+            loss_alpha=params["alpha"],
+            loss_beta=params["beta"],
+            add_theta=params["theta"],
+            add_omega=params["omega"],
+            save_mem=save_memory,
+        )
     batch_size = params["image_count"]
+
+
     cond = model.get_learned_conditioning(
         dict(
             c_concat=[hint],
@@ -239,7 +256,7 @@ def get_latent(prompt, polygons, params, flat_ref=None):
     if save_memory:
         model.low_vram_shift(is_diffusing=True)
     model.control_scales = [params["strength"]] * 13
-    samples, _ = ddim_sampler.sample(
+    samples, intermediates = ddim_sampler.sample(
         params["ddim_steps"],
         batch_size,
         shape,
@@ -250,6 +267,23 @@ def get_latent(prompt, polygons, params, flat_ref=None):
         unconditional_guidance_scale=params["cfg_scale"],
         unconditional_conditioning=un_cond,
     )
+    # if flat_ref is not None:
+    #     for idx, x_inter in enumerate(intermediates["x_inter"]):
+    #         # print(idx)
+    #         x_inter = model.decode_first_stage(x_inter)
+    #         decode_x0 = model.decode_first_stage(intermediates["pred_x0"][idx])
+    #         decode_x0 = torch.clamp(decode_x0, -1, 1)
+    #         decode_x0 = (decode_x0 + 1.0) / 2.0 * 255  # -1,1 -> 0,255; n, c,h,w
+    #         decode_x0 = einops.rearrange(decode_x0, "b c h w -> b h w c").cpu().numpy().clip(0, 255).astype(np.uint8)
+    #         x_inter = (einops.rearrange(x_inter, "b c h w -> b h w c") * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
+    #         if not os.path.exists(os.path.join(img_save_folder,"inter")):
+    #             os.makedirs(os.path.join(img_save_folder, "inter"))
+    #         for i in range(params['image_count']):
+    #             cv2.imwrite(os.path.join(img_save_folder, "inter",f"{idx}_{i}.png"), x_inter[i])
+    #         if not os.path.exists(os.path.join(img_save_folder, "inter_other")):
+    #             os.makedirs(os.path.join(img_save_folder, "inter_other"))
+    #         for i in range(params['image_count']):
+    #             cv2.imwrite(os.path.join(img_save_folder, "inter_other",f"{idx}_{i}.png"), decode_x0[i])
     info["samples"] = samples
     return info
 
@@ -405,21 +439,22 @@ if __name__ == "__main__":
         'A meticulously designed logo, a minimalist brain, stick drawing style, simplistic style,  refined with minimal strokes, black and white color, white background,  futuristic sense, exceptional design, logo name is "NextAI"': 2563689,
         'A raccoon stands in front of the blackboard with the words "Deep Learning" written on it': 33789703,
         'A nice drawing in pencil of Michael Jackson,  with the words "Micheal" and "Jackson" written on it': 83866922,
+        
         # 'a photo of a lovely couple with a banner writes "新婚快乐"':42,
     }
     mask_lists = [
         # """./masks/a photo of a lovely couple with a banner writes "新婚快乐"_1_1.png""",
-        """Result/ori/masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1_1_1_1.png""",
-        """Result/ori/masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1_1_1.png""",
-        """Result/ori/masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1_1.png""",
-        """Result/ori/masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1.png""",
-        """Result/ori/masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman".png""",
+        # """Result/ori/masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1_1_1_1.png""",
+        # """Result/ori/masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1_1_1.png""",
+        # """Result/ori/masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1_1.png""",
+        # """Result/ori/masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"_1.png""",
+        # """Result/ori/masks/A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman".png""",
         """Result/ori/masks/A nice drawing in pencil of Michael Jackson,  with the words "Micheal" and "Jackson" written on it_1_1.png""",
         """Result/ori/masks/A nice drawing in pencil of Michael Jackson,  with the words "Micheal" and "Jackson" written on it_1.png""",
-        """Result/ori/masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it_1_1_1.png""",
-        """Result/ori/masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it_1_1.png""",
-        """Result/ori/masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it_1.png""",
-        """Result/ori/masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it.png""",
+        # """Result/ori/masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it_1_1_1.png""",
+        # """Result/ori/masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it_1_1.png""",
+        # """Result/ori/masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it_1.png""",
+        # """Result/ori/masks/A raccoon stands in front of the blackboard with the words "Deep Learning" written on it.png""",
     ]
     ref_mask_list = {
         'A crayon drawing by child,  a snowman with a Santa hat, pine trees, outdoors in heavy snowfall, titled "Snowman"': "example_images/gen18.png",

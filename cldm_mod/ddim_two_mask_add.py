@@ -489,6 +489,7 @@ class myDDIMSampler(DDIMSampler):
                 C, H, W = x_tar[i].shape
                 rect_mask = torch.tensor(rect_mask).permute(2,0,1).unsqueeze(0).float().cuda()
                 rect_mask =  F.interpolate(rect_mask, (H, W))
+                # rect_mask = F.interpolate(pos.unsqueeze(0).float(), (H, W))
                 # valid_pixel = rect_mask.sum()
                 # masked_mean = (x_tar[i]*rect_mask).sum(dim=(-2,-1)) / valid_pixel
                 # masked_std = ((x_tar[i]*rect_mask).pow(2).sum(dim=(-2,-1)) / valid_pixel - masked_mean.pow(2)).sqrt()
@@ -506,6 +507,6 @@ class myDDIMSampler(DDIMSampler):
                 glyph_latent = AdaINnorm(x_tar[i],glyph_latent, rect_mask)
                 blend_factor = 10 ** -c["text_info"]["cur_step"]
 
-                x_tar[i] = x_tar[i]*(1-rect_mask) + self.add_theta * rect_mask * glyph_latent * blend_factor + (1 - blend_factor) * rect_mask * x_tar[i]
+                x_tar[i] = x_tar[i] * (1 - rect_mask) + self.add_theta * rect_mask * glyph_latent * blend_factor + (1 - blend_factor) * rect_mask * x_tar[i]
         print("Done Adding Glyph")
         return x_tar
