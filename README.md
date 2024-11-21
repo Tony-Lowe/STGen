@@ -26,19 +26,6 @@ FP16 inference is used as default, and a Chinese-to-English translation model is
 ```bash
 export CUDA_VISIBLE_DEVICES=0 && python demo.py --use_fp32 --no_translator
 ```
-If FP16 is used and the translation model not used(or load it on CPU, [see here](https://github.com/tyxsspa/AnyText/issues/33)), generation of one single 512x512 image will occupy ~7.5GB of GPU memory.  
-In addition, other font file can be used by(although the result may not be optimal):
-```bash
-export CUDA_VISIBLE_DEVICES=0 && python demo.py --font_path your/path/to/font/file.ttf
-```
-You can also load a specified AnyText checkpoint:
-```bash
-export CUDA_VISIBLE_DEVICES=0 && python demo.py --model_path your/path/to/your/own/anytext.ckpt
-```
-
-In this demo, you can change the style during inference by either change the base model or loading LoRA models(must based on SD1.5):  
-- Change base model: Simply fill in your local base model's path in the [Base Model Path].  
-- Load LoRA models: Input your LoRA model's path and weight ratio into the [LoRA Path and Ratio]. For example: `/path/of/lora1.pth 0.3 /path/of/lora2.safetensors 0.6`.
 
 
 
