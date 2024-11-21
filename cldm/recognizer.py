@@ -1,6 +1,3 @@
-'''
-Copyright (c) Alibaba, Inc. and its affiliates.
-'''
 import os
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))

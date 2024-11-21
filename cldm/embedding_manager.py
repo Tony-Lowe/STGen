@@ -1,6 +1,3 @@
-'''
-Copyright (c) Alibaba, Inc. and its affiliates.
-'''
 from curses import has_key
 from attr import has
 import torch
