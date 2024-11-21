@@ -618,14 +618,17 @@ with block:
                 gr.Markdown("")
                 use_curve = gr.Checkbox(
                     label="Use Bezier glyph draw(是否使用贝塞尔曲线拟合mask)",
-                    value=True,
+                    value=False,
                 )
+                gr.Markdown("")
+            with gr.Row():
+                gr.Markdown("")
                 run_gen = gr.Button(value="Run(运行)!", scale=0.3, elem_classes="run")
                 gr.Markdown("")
             with gr.Row():
                 gr.Markdown("")
                 run_edit = gr.Button(
-                    value="Run Edit(运行编辑)!", scale=0.3, elem_classes="run"
+                    value="Run Edit(运行编辑)!", scale=0.3, elem_classes="run",visible=False
                 )
                 gr.Markdown("")
         with left_part:
@@ -708,8 +711,8 @@ with block:
 
             with gr.Accordion("🛠Optimization Parameters(优化参数)", open=False):
                 with gr.Row(variant="compact"):
-                    step_size = gr.Number(label="Step Size(优化步长)", value=0)
-                    lamd = gr.Number(label="Lambda(loss系数)", value=0)
+                    step_size = gr.Number(label="Step Size(优化步长)", value=0,visible=False)
+                    lamd = gr.Number(label="Lambda(loss系数)", value=0,visible=False)
                     op_step = gr.Number(label="Optimize Steps(优化步数)", value=1)
                 with gr.Row(variant="compact"):
                     start_op_step = gr.Number(
@@ -719,8 +722,8 @@ with block:
                         label="End Optimize Step(结束优化的inference步数)", value=0
                     )
                 with gr.Row(variant="compact"):
-                    add_theta = gr.Number(label="Theta(Add glyph 系数)", value=0.5)
-                    add_omega = gr.Number(label="Omega(Add Flatten 系数)", value=0.45)
+                    add_theta = gr.Number(label="Lambda", value=0.5)
+                    add_omega = gr.Number(label="Rho", value=0.45)
 
             prompt = gr.Textbox(label="Prompt(提示词)")
             with gr.Tabs() as tab_modes:
@@ -934,35 +937,29 @@ with block:
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
-                                    4,
+                                    1,
                                     20001031,
                                     "example_images/33_ref.png",
                                     0.5,
-                                    0.3,
-                                ],
-                                [
-                                    'A romantic dinner table set for two, with candles and flowers arranged in a V shape, displaying "Forever" and "Love".',
-                                    "example_images/13.png",
-                                    "Manual-draw(手绘)",
-                                    "↕",
+                                    0.45,
+                                    0,
+                                    0,
                                     False,
-                                    4,
-                                    -1,
-                                    "example_images/13_ref.jpg",
-                                    0.5,
-                                    2,
                                 ],
                                 [
-                                    'A vibrant street art mural in a lively city square, showcasing " CVPR" in bold, artistic graffiti surrounded by other cheerful designs and bright splashes of color.',
+                                    'A vibrant street art mural in a lively city square, showcasing "CVPR" in bold, artistic graffiti surrounded by other cheerful designs and bright splashes of color.',
                                     "example_images/10.png",
                                     "Manual-draw(手绘)",
                                     "↕",
                                     False,
                                     4,
-                                    33952702,
+                                    37873140,
                                     "example_images/10_ref.jpg",
                                     0.5,
                                     2,
+                                    0,
+                                    0,
+                                    False,
                                 ],
                                 [
                                     'A forest shrouded in mysterious morning mist, with a playful unicorn frolicking among glowing flowers, trees sparkling with soft light, and the words "Mystic Realm" floating joyfully in the air',
@@ -975,21 +972,12 @@ with block:
                                     "example_images/1_ref.jpg",
                                     0.5,
                                     0.5,
+                                    0,
+                                    10,
+                                    True,
                                 ],
                                 [
-                                    'On a late night under a sky full of stars, a child walks along the road,with the floating lyrics "Twinkle" "Twinkle" "Little Star" arranged in an S-shape.',
-                                    "example_images/17.png",
-                                    "Manual-draw(手绘)",
-                                    "↕",
-                                    False,
-                                    4,
-                                    -1,
-                                    "example_images/17_ref.png",
-                                    0.55,
-                                    2.,
-                                ],
-                                [
-                                    'An exquisite watch sits elegantly, with its detailed design and clear hands visible on the dial. At the bottom, the text “海鸥表” is presented in a downward arc, seamlessly blending into the image and echoing the watch\'s elegant style.',
+                                    "An exquisite watch sits elegantly, with its detailed design and clear hands visible on the dial. At the bottom, the text “海鸥表” is presented in a downward arc, seamlessly blending into the image and echoing the watch's elegant style.",
                                     "example_images/24.png",
                                     "Manual-draw(手绘)",
                                     "↕",
@@ -998,7 +986,10 @@ with block:
                                     -1,
                                     "example_images/24_ref.png",
                                     0.5,
-                                    2.,
+                                    2.0,
+                                    0,
+                                    10,
+                                    True,
                                 ],
                                 [
                                     'A steaming cup of coffee on a cozy wooden table, with delicate latte art on top spelling out the words "Good" and "Morning" in creamy, frothy letters.',
@@ -1010,7 +1001,40 @@ with block:
                                     -1,
                                     "example_images/25_ref.png",
                                     0.5,
-                                    2.,
+                                    2.0,
+                                    0,
+                                    10,
+                                    True,
+                                ],
+                                [
+                                    'A romantic dinner table set for two, with candles and flowers arranged in a V shape, displaying "Forever" and "Love".',
+                                    "example_images/13.png",
+                                    "Manual-draw(手绘)",
+                                    "↔",
+                                    False,
+                                    4,
+                                    17723880,
+                                    "example_images/13_ref.jpg",
+                                    0.5,
+                                    2,
+                                    0,
+                                    10,
+                                    False,
+                                ],
+                                [
+                                    'On a late night under a sky full of stars, a child walks along the road,with the floating lyrics "Twinkle" "Twinkle" "Little Star" arranged in an S-shape.',
+                                    "example_images/17.png",
+                                    "Manual-draw(手绘)",
+                                    "↕",
+                                    False,
+                                    4,
+                                    -1,
+                                    "example_images/17_ref.png",
+                                    0.55,
+                                    2.0,
+                                    0,
+                                    10,
+                                    False,
                                 ],
                             ],
                             [
@@ -1024,6 +1048,9 @@ with block:
                                 draw_ref,
                                 add_theta,
                                 add_omega,
+                                start_op_step,
+                                end_op_step,
+                                use_curve,
                             ],
                             examples_per_page=5,
                             label="",
