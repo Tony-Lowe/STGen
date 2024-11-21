@@ -2,10 +2,6 @@
 
 ![sample](docs/paper_teaser.png "sample")
 
-
-## ⚠️ Attention
-We are still organizing our *Divide and Conquer* module and the speed of this code can still be optimized. Our full and optimized code will be released on github upon acceptance.  
-
 ## 🛠Installation
 ```bash
 # Install git (skip if already done)
@@ -27,5 +23,6 @@ FP16 inference is used as default, and a Chinese-to-English translation model is
 export CUDA_VISIBLE_DEVICES=0 && python demo.py --use_fp32 --no_translator
 ```
 
-
+## ⚠️ Attention
+We are still organizing our *Divide and Conquer* module and the speed of this code can still be optimized. Our full and optimized code will be released on github upon acceptance.  
 
