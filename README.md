@@ -3,6 +3,9 @@
 ![sample](docs/paper_teaser.png "sample")
 
 
+## ⚠️ Attention
+We are still organizing our *Divide and Conquer* module. We will update our code upon acceptance. And the speed of this code can still be optimized. Our full and optimized code will be released on github upon acceptance.  
+
 ## 🛠Installation
 ```bash
 # Install git (skip if already done)
