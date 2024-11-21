@@ -947,7 +947,7 @@ with block:
                                     "↕",
                                     False,
                                     4,
-                                    20001031,
+                                    -1,
                                     "example_images/13_ref.jpg",
                                     0.5,
                                     2,
