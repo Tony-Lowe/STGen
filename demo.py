@@ -956,7 +956,7 @@ with block:
                                     False,
                                     4,
                                     37873140,
-                                    "example_images/10_ref.jpg",
+                                    "example_images/10_ref.png",
                                     0.5,
                                     2,
                                     0,
