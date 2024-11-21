@@ -1,4 +1,4 @@
-name: anytext
+name: stgen
 channels:
   - pytorch
   - nvidia
