@@ -100,6 +100,7 @@ def sep_mask(pos_imgs, sort_radio="↕"):
         contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[1])
     else:
         contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[0])
+    contours = [cnt for cnt in contours if cnt.shape[0] > 10]
     # poly = []
     # for contour in contours:
     #     rect = cv2.minAreaRect(contour)
