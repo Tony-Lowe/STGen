@@ -160,7 +160,7 @@ def draw_glyph3(
 
     # print("Text Width",text_w)
     # print("w",w,"h",h)
-    print("angle", angle)
+    # print("angle", angle)
 
     if text_w <= max(w, h):
         # add space
@@ -190,7 +190,7 @@ def draw_glyph3(
         text_width = right - left
         text_height = bottom - top
 
-    print("text_width: ", text_width)
+    # print("text_width: ", text_width)
 
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
@@ -286,7 +286,7 @@ def draw_glyph4(
 
     # print("Text Width",text_w)
     # print("w",w,"h",h)
-    print("angle", angle)
+    # print("angle", angle)
 
     if text_w <= max(w, h):
         # add space
@@ -316,7 +316,7 @@ def draw_glyph4(
         text_width = right - left
         text_height = bottom - top
 
-    print("text_width: ", text_width)
+    # print("text_width: ", text_width)
 
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
