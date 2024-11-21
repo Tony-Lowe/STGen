@@ -14,7 +14,7 @@ import math
 import torch.nn.functional as F
 from PIL import Image, ImageDraw, ImageFont
 from t3_dataset import insert_spaces
-from cldm.ctrl import AttentionStore
+# from cldm.ctrl import AttentionStore
 
 def draw_glyph_sp(font,text,rect, scale=1, width=512, height=512, add_space=True):
     cx,cy = rect[0]
@@ -322,7 +322,7 @@ def pca_compute(attn_map, img_size=512,n_c=3):
 
 
 def aggregate_attention(
-    attention_store: AttentionStore, res: int, from_where: List[int]
+    attention_store, res: int, from_where: List[int]
 ):
     out = []
     attention_maps = attention_store.get_average_attention()
@@ -702,9 +702,9 @@ def draw_glyph_curve(
     avg_points = (up_points + down_points) / 2
 
     img = draw_polygon(width * scale, height * scale, np.concatenate([up_points, down_points[::-1]], axis=0), color='red')
-    img.save('draw_glyph_test/bezier_curve.png')
+    # img.save('draw_glyph_test/bezier_curve.png')
     img = draw_polygon(width * scale, width * scale, avg_points, color='red')
-    img.save('draw_glyph_test/bezier_curve_avg.png')
+    # img.save('draw_glyph_test/bezier_curve_avg.png')
     
     # 估计文本框尺寸，并基于文本框尺寸预测文本大小，需要丢弃曲线两端一定比例
     discard_ratio = 0.1

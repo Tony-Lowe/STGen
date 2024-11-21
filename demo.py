@@ -86,7 +86,8 @@ def parse_args():
     parser.add_argument(
         "--model_path",
         type=str,
-        default="your path to the anytext checkpoint",
+        # default="your path to the anytext checkpoint",
+        default="/data/hugging_face_models/cv_anytext_text_generation_editing/anytext_v1.1.ckpt",
         help="load a specified anytext checkpoint",
     )
     parser.add_argument(
@@ -478,26 +479,27 @@ def process(
             pos_imgs = generate_rectangles(w, h, n_lines, max_trys=500)
     # Text Editing
     elif mode == "edit":
-        revise_pos = False  # disable pos revise in edit mode
-        if ref_img is None or ori_img is None:
-            raise gr.Error("No reference image, please upload one for edit!")
-        edit_image = ori_img.clip(1, 255)  # for mask reason
-        edit_image = check_channels(edit_image)
-        edit_image = resize_image(edit_image, max_length=768)
-        h, w = edit_image.shape[:2]
-        if (
-            isinstance(ref_img, dict)
-            and "mask" in ref_img
-            and ref_img["mask"].mean() > 0
-        ):
-            pos_imgs = 255 - edit_image
-            edit_mask = cv2.resize(ref_img["mask"][..., 0:3], (w, h))
-            pos_imgs = pos_imgs.astype(np.float32) + edit_mask.astype(np.float32)
-            pos_imgs = pos_imgs.clip(0, 255).astype(np.uint8)
-        else:
-            if isinstance(ref_img, dict) and "image" in ref_img:
-                ref_img = ref_img["image"]
-            pos_imgs = 255 - ref_img  # example input ref_img is used as pos
+        # revise_pos = False  # disable pos revise in edit mode
+        # if ref_img is None or ori_img is None:
+        #     raise gr.Error("No reference image, please upload one for edit!")
+        # edit_image = ori_img.clip(1, 255)  # for mask reason
+        # edit_image = check_channels(edit_image)
+        # edit_image = resize_image(edit_image, max_length=768)
+        # h, w = edit_image.shape[:2]
+        # if (
+        #     isinstance(ref_img, dict)
+        #     and "mask" in ref_img
+        #     and ref_img["mask"].mean() > 0
+        # ):
+        #     pos_imgs = 255 - edit_image
+        #     edit_mask = cv2.resize(ref_img["mask"][..., 0:3], (w, h))
+        #     pos_imgs = pos_imgs.astype(np.float32) + edit_mask.astype(np.float32)
+        #     pos_imgs = pos_imgs.clip(0, 255).astype(np.uint8)
+        # else:
+        #     if isinstance(ref_img, dict) and "image" in ref_img:
+        #         ref_img = ref_img["image"]
+        #     pos_imgs = 255 - ref_img  # example input ref_img is used as pos
+        pass
     if not os.path.exists(os.path.join(img_save_folder, "masks")):
         os.makedirs(os.path.join(img_save_folder, "masks"))
     mask_save = os.path.join(img_save_folder, "masks", f"{prompt}.png")
@@ -540,7 +542,7 @@ def process(
         "seed": seed,
         "draw_pos": pos_imgs,  # numpy (w, h, 1)
         "draw_ref": ref_pos,
-        "ori_image": ori_img,
+        # "ori_image": ori_img,
     }
 
     results = inference(input_data, **params)
@@ -960,7 +962,7 @@ with block:
                                     False,
                                     4,
                                     33952702,
-                                    "example_images/10_ref.jpg",
+                                    "example_images/10_ref.png",
                                     0.5,
                                     2,
                                 ],
