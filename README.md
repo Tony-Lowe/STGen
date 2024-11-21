@@ -1,6 +1,6 @@
 # Beyond Flat Text: Dual Self-inherited Guidance for Visual Text Generation
 
-![sample](docs/paper_teaser.pdf "sample")
+![sample](docs/paper_teaser.png "sample")
 
 
 ## 🛠Installation
