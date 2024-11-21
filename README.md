@@ -4,7 +4,7 @@
 
 
 ## ⚠️ Attention
-We are still organizing our *Divide and Conquer* module. We will update our code upon acceptance. And the speed of this code can still be optimized. Our full and optimized code will be released on github upon acceptance.  
+We are still organizing our *Divide and Conquer* module and the speed of this code can still be optimized. Our full and optimized code will be released on github upon acceptance.  
 
 ## 🛠Installation
 ```bash
