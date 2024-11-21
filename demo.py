@@ -1030,7 +1030,7 @@ with block:
                                     "↕",
                                     False,
                                     4,
-                                    -1,
+                                    38869,
                                     "example_images/17_ref.png",
                                     0.55,
                                     2.0,
