@@ -22,6 +22,7 @@ FP16 inference is used as default, and a Chinese-to-English translation model is
 ```bash
 export CUDA_VISIBLE_DEVICES=0 && python demo.py --use_fp32 --no_translator
 ```
+![demo](docs/demo.png)
 
 ## ⚠️ Attention
 We are still organizing our *Divide and Conquer* module and the speed of this code can still be optimized. Our full and optimized code will be released on github upon acceptance.  
